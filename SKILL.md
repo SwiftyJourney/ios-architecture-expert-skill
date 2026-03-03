@@ -1,5 +1,5 @@
 ---
-name: ios-clean-architecture
+name: ios-architecture-expert
 description: >
   Guides building modular, testable iOS/Swift applications following the
   Essential Developer methodology -- clean architecture with protocol-oriented
@@ -8,7 +8,7 @@ description: >
   or reviewing iOS architecture.
 ---
 
-# iOS Clean Architecture — Essential Developer Methodology
+# iOS Architecture Expert — Essential Developer Methodology
 
 ## Agent Behavior Contract
 
