@@ -1,5 +1,26 @@
 # Architecture Layers — Code Reference
 
+Use this when:
+- You need to define a domain model, use-case protocol, or layer boundary
+- You need to understand what imports are allowed in each layer
+- You need code patterns for API mappers, cache layer, or presentation
+- You need UIKit or SwiftUI UI layer patterns
+
+Skip this file if:
+- You need Composition Root wiring. Use `composition-root.md`.
+- You need adapter/proxy patterns. Use `adapters-and-proxies.md`.
+- You need concurrency annotations rationale. Use `concurrency-at-boundaries.md`.
+
+Jump to:
+- [Feature Layer](#feature-layer-foundation-only)
+- [API Layer](#api-layer-foundation-only)
+- [Cache Layer](#cache-layer-foundation-only)
+- [Presentation Layer](#presentation-layer-foundation-only)
+- [UI Layer — UIKit](#ui-layer--uikit)
+- [UI Layer — SwiftUI](#ui-layer--swiftui-equivalent)
+
+---
+
 ## Feature Layer (Foundation only)
 
 Domain models are value types. Use-case contracts are protocols. No framework imports.
@@ -27,9 +48,26 @@ public protocol FeedImageDataLoader {
 public protocol FeedImageDataCache {
     func save(_ data: Data, for url: URL) throws
 }
+
+// Store protocol — image data persistence
+public protocol FeedImageDataStore {
+    func insert(_ data: Data, for url: URL) throws
+    func retrieve(dataForURL url: URL) throws -> Data?
+}
 ```
 
 **Rules**: Models own no behavior. Protocols define single-responsibility boundaries. Each protocol maps to one use case.
+
+```swift
+// Correct: value type + Sendable + Hashable
+public struct FeedImage: Hashable, Sendable {  // ...
+}
+
+// Incorrect: class, mutable, not Sendable
+public class FeedImage {  // BAD — reference type, not thread-safe
+    var id: UUID           // BAD — mutable
+}
+```
 
 ---
 
@@ -173,16 +211,16 @@ final class FeedCachePolicy {
 }
 ```
 
-**Rules**: `LocalFeedLoader` converts between `FeedImage` ↔ `LocalFeedImage` at the boundary. `currentDate` is injected as a closure for test control. Cache policy is a separate type — not embedded in the loader. Store protocol uses `throws` (not callbacks).
+**Rules**: `LocalFeedLoader` converts between `FeedImage` <-> `LocalFeedImage` at the boundary. `currentDate` is injected as a closure for test control. Cache policy is a separate type — not embedded in the loader. Store protocol uses `throws` (not callbacks).
 
 ---
 
 ## Presentation Layer (Foundation only)
 
-Generic presenter drives loading/error/success state. View protocols use associated types. View models are plain structs.
+Generic presenter drives loading/error/success state. View protocols use associated types and `@MainActor`. View models are plain structs.
 
 ```swift
-// View protocol — associated type for generic binding
+// View protocols — @MainActor for thread-safe UI updates
 @MainActor
 public protocol ResourceView {
     associatedtype ResourceViewModel
@@ -199,6 +237,8 @@ public protocol ResourceErrorView {
     func display(_ viewModel: ResourceErrorViewModel)
 }
 ```
+
+`@MainActor` on view protocols is a **concurrency annotation**, not a framework dependency. The Presentation layer still imports only Foundation. This annotation ensures all display calls happen on the main thread.
 
 ```swift
 // View models — plain structs
@@ -225,12 +265,29 @@ public final class LoadResourcePresenter<Resource, View: ResourceView> {
     private let errorView: ResourceErrorView
     private let mapper: Mapper
 
+    public static var loadError: String {
+        NSLocalizedString("GENERIC_CONNECTION_ERROR",
+                          tableName: "Shared",
+                          bundle: Bundle(for: Self.self),
+                          comment: "Error message displayed when we can't load the resource from the server")
+    }
+
     public init(resourceView: View, loadingView: ResourceLoadingView,
-                errorView: ResourceErrorView, mapper: @escaping Mapper) { ... }
+                errorView: ResourceErrorView, mapper: @escaping Mapper) {
+        self.resourceView = resourceView
+        self.loadingView = loadingView
+        self.errorView = errorView
+        self.mapper = mapper
+    }
 
     // Convenience: when Resource == View.ResourceViewModel, mapper is identity
     public init(resourceView: View, loadingView: ResourceLoadingView,
-                errorView: ResourceErrorView) where Resource == View.ResourceViewModel { ... }
+                errorView: ResourceErrorView) where Resource == View.ResourceViewModel {
+        self.resourceView = resourceView
+        self.loadingView = loadingView
+        self.errorView = errorView
+        self.mapper = { $0 }
+    }
 
     public func didStartLoading() {
         errorView.display(.noError)
@@ -253,7 +310,7 @@ public final class LoadResourcePresenter<Resource, View: ResourceView> {
 }
 ```
 
-**Rules**: Presenter has no UIKit/SwiftUI imports. Error strings use `NSLocalizedString` with `Bundle(for: Self.self)`. The `Mapper` typealias allows resource transformation (e.g., `Data → UIImage`). Identity mapper convenience init eliminates boilerplate when types match.
+**Rules**: Presenter has no UIKit/SwiftUI imports. Error strings use `NSLocalizedString` with `Bundle(for: Self.self)`. The `Mapper` typealias allows resource transformation (e.g., `Data -> UIImage`). Identity mapper convenience init eliminates boilerplate when types match.
 
 ---
 
@@ -343,3 +400,23 @@ struct FeedView: View {
 ```
 
 **Rules**: `@Observable` replaces the `WeakRefVirtualProxy` pattern — SwiftUI manages view lifecycle. Composition Root creates the `@Observable` view model and passes it via `@State` or `.environment()`. Presenter logic (mapping, error strings) is still reused from the shared Presentation layer.
+
+---
+
+## Guardrails
+
+- Do not import UIKit/SwiftUI in Feature, API, Cache, or Presentation layers — Foundation only
+- Do not use `class` for domain models — use `struct` with `Hashable` and `Sendable`
+- Do not embed cache policy in the loader — keep it as a separate type with `static` methods
+- Do not leak `Decodable` types beyond the mapper — keep them `private`
+- Do not add `@MainActor` to domain models or store protocols — isolation is decided at the composition level
+
+## Verification
+
+- [ ] Feature layer has zero framework imports beyond Foundation
+- [ ] All domain models are `struct`, `Hashable`, `Sendable`
+- [ ] All use-case boundaries are protocols (not concrete types)
+- [ ] View protocols (`ResourceView`, `ResourceLoadingView`, `ResourceErrorView`) are `@MainActor`
+- [ ] Mapper Decodable types are `private`
+- [ ] `LocalFeedImage` is decoupled from `FeedImage` (separate type)
+- [ ] Cache policy has no instance state — `static` methods only

@@ -27,6 +27,21 @@ When this skill is active, follow these rules **strictly**:
 
 ---
 
+## Architecture Diagnostic Table
+
+| Symptom | First check | Smallest safe fix | Deep dive |
+|---|---|---|---|
+| Feature module imports UIKit/SwiftUI | Dependency graph | Move type to correct layer | `references/architecture-layers.md` |
+| Retain cycle between presenter and view | Proxy wiring | Add `WeakRefVirtualProxy` | `references/adapters-and-proxies.md` |
+| CoreData crashes on launch | Fallback strategy | Add `InMemoryFeedStore` fallback | `references/composition-root.md` |
+| Duplicate network requests on refresh | `isLoading` guard | Use `LoadResourcePresentationAdapter` | `references/adapters-and-proxies.md` |
+| Test requires real infrastructure | Protocol boundary | Extract protocol at boundary | `references/testing-strategy.md` |
+| Sendable warning at composition boundary | Closure annotations | Add `@Sendable` + `@MainActor` | `references/concurrency-at-boundaries.md` |
+| Pagination won't load next page | `loadMore` closure | Verify recursive composition in `FeedViewAdapter` | `references/composition-root.md` |
+| Cache validation doesn't run | `Task.immediate` usage | Use fire-and-forget with `Task.immediate` | `references/concurrency-at-boundaries.md` |
+
+---
+
 ## Architecture Layers
 
 | Layer | Responsibility |
@@ -48,17 +63,18 @@ When this skill is active, follow these rules **strictly**:
 | Pattern | Purpose |
 |---------|---------|
 | `LoadResourcePresenter<Resource, View>` | Reusable loading/error/success state machine with generic mapper |
-| `WeakRefVirtualProxy<T>` | Break retain cycles in presenter→view binding via conditional conformance |
-| Specification Pattern | Protocol-driven shared test specs across store implementations |
-| Composition Root / Service | Central dependency creation and wiring (`FeedService`) |
-| UI Composer (static factory) | Wire presenter→adapter→view chain per feature (`FeedUIComposer.feedComposedWith`) |
+| `WeakRefVirtualProxy<T>` | Break retain cycles in presenter->view binding via conditional conformance |
 | `LoadResourcePresentationAdapter` | Generic async loader bridging use cases to presenters with cancellation |
 | `FeedViewAdapter` | Maps domain models to `CellController` array, composes recursive `loadMore` |
 | `Paginated<Item>` | Recursive pagination with optional `loadMore` closure (`Sendable`) |
+| Composition Root / `FeedService` | `@MainActor` orchestrator with lazy init, Scheduler, and fallback strategy |
+| `Scheduler` protocol | Abstract store execution context for CoreData/InMemory polymorphism |
+| `InMemoryFeedStore` | `@MainActor` fallback store — production fallback + acceptance test double |
+| `LoaderSpy<Param, Resource>` | Generic async test spy using `AsyncThrowingStream` for UI integration tests |
+| Specification Pattern | Protocol-driven shared test specs across store implementations |
+| UI Composer (static factory) | Wire presenter->adapter->view chain per feature (`FeedUIComposer.feedComposedWith`) |
 | Static Mapper | Pure function for data transformation — `FeedItemsMapper.map(_:from:)` |
 | Cache Policy | Business rule encapsulation for cache validation — `FeedCachePolicy.validate(_:against:)` |
-| Local Model | Cache-layer representation decoupled from domain — `LocalFeedImage` |
-| `Scheduler` protocol | Abstract store execution context for CoreData/InMemory polymorphism |
 | `CellController` | Type-erased cell composition — wraps `UITableViewDataSource` + `Delegate` + `Prefetching` |
 
 ---
@@ -67,33 +83,61 @@ When this skill is active, follow these rules **strictly**:
 
 Starting a new feature? Follow this path:
 
-1. **Define the domain model** → `struct` in Feature layer, `Hashable`, `Sendable`
-2. **Need remote data?** → Endpoint enum + static mapper in API layer
-3. **Need persistence?** → Store protocol + local model + cache policy in Cache layer
-4. **Need to display it?** → `LoadResourcePresenter` + view model struct in Presentation layer
-5. **UIKit or SwiftUI?** → Build view layer, conform to `ResourceView` protocols
-6. **Wire it up** → Composer + adapter + proxy in Composition Root
+1. **Define the domain model** -> `struct` in Feature layer, `Hashable`, `Sendable`
+2. **Add concurrency annotations** -> `@MainActor` on view protocols, `Sendable` on models
+3. **Need remote data?** -> Endpoint enum + static mapper in API layer
+4. **Need persistence?** -> Store protocol + local model + cache policy in Cache layer
+5. **Need to display it?** -> `LoadResourcePresenter` + view model struct in Presentation layer
+6. **UIKit or SwiftUI?** -> Build view layer, conform to `ResourceView` protocols
+7. **Wire it up** -> Composer + adapter + proxy in Composition Root
+8. **Verify concurrency** -> Build with `SWIFT_STRICT_CONCURRENCY = complete`, run Thread Sanitizer
 
 > Step-by-step guide: [feature-implementation-workflow.md](references/feature-implementation-workflow.md)
 
 ---
 
-## Modernization Notes
+## Guardrails
 
-**SPM over xcframework**: Structure as a multi-target Swift package. Feature and API/Cache targets depend only on Foundation. UI targets import UIKit/SwiftUI. Composition target imports everything. See [spm-project-structure.md](references/spm-project-structure.md).
-
-**Swift Testing over XCTest**: New test suites use `@Test` and `#expect`. Shared specs become protocol extensions with `@Test` methods. The `makeSUT()` pattern and `trackForMemoryLeaks` adapt to Swift Testing's lifecycle. Defer to the `swift-testing-expert` skill for detailed patterns.
-
-**async/await**: `HTTPClient` returns `async throws`. `LoadResourcePresentationAdapter` uses `Task.immediate` for synchronous-first execution. `Paginated<Item>.loadMore` is `@Sendable () async throws -> Self`. `Scheduler` protocol abstracts CoreData context dispatch.
-
-**SwiftUI composition**: Replace `WeakRefVirtualProxy` with `@Observable` view models (SwiftUI manages lifecycle). Replace `CellController` type-erasure with `ForEach` + `@ViewBuilder`. Composition Root injects `@Observable` objects via `.environment()`. See SwiftUI sections in [composition-and-adapters.md](references/composition-and-adapters.md).
+- Do not create concrete types inside feature modules — all instantiation belongs in the Composition Root
+- Do not use singletons — `lazy var` in `FeedService` achieves deferred init without global state
+- Do not add `@MainActor` to domain types or store protocols — only presentation, adapters, and composition
+- Do not use `@unchecked Sendable` — redesign the type as a value type or use `@MainActor`
+- Do not embed cache policy logic inside the loader — keep it as a separate type
+- Do not put navigation logic in view controllers — use closure callbacks wired in the Composition Root
+- Defer non-architectural concurrency questions to the `swift-concurrency` skill
 
 ---
 
-## References
+## Verification Checklist
 
-- [architecture-layers.md](references/architecture-layers.md) — Layer-by-layer patterns with code examples from each architectural boundary
-- [composition-and-adapters.md](references/composition-and-adapters.md) — Composition Root, UI composers, adapters, proxies, and pagination (UIKit + SwiftUI)
-- [testing-strategy.md](references/testing-strategy.md) — Five-layer test strategy: unit, specification, integration, snapshot, acceptance
-- [feature-implementation-workflow.md](references/feature-implementation-workflow.md) — Step-by-step checklist for building a feature end-to-end
-- [spm-project-structure.md](references/spm-project-structure.md) — SPM multi-target layout, Package.swift example, and CI configuration
+When implementing or reviewing architecture:
+
+1. Build with `SWIFT_STRICT_CONCURRENCY = complete` — zero warnings
+2. No UIKit/SwiftUI imports in Feature/API/Cache modules
+3. All protocol boundaries have corresponding test doubles
+4. `makeSUT()` exists in every test class
+5. CoreData store has `InMemoryFeedStore` fallback in Composition Root
+6. Run Thread Sanitizer (`-enableThreadSanitizer YES`) — zero data races
+7. `WeakRefVirtualProxy` wraps all view references in UIKit composition (or `@Observable` in SwiftUI)
+8. Pagination `loadMore` is `nil` for the last page
+
+---
+
+## Reference Router
+
+Open the smallest reference that matches the question:
+
+- **Architecture & Layers**
+  - [architecture-layers.md](references/architecture-layers.md) — layer boundaries, domain models, protocols
+  - [spm-project-structure.md](references/spm-project-structure.md) — module layout, Package.swift, CI
+- **Composition & Wiring**
+  - [composition-root.md](references/composition-root.md) — FeedService, Scheduler, fallback, dependency creation
+  - [adapters-and-proxies.md](references/adapters-and-proxies.md) — adapter, proxy, view adapter, pagination wiring
+- **Concurrency in Architecture**
+  - [concurrency-at-boundaries.md](references/concurrency-at-boundaries.md) — Scheduler, @Sendable, Task.immediate, cancellation
+- **Testing**
+  - [testing-strategy.md](references/testing-strategy.md) — unit, spec, integration, snapshot, acceptance
+- **Workflow**
+  - [feature-implementation-workflow.md](references/feature-implementation-workflow.md) — step-by-step feature building
+- **Navigation index**
+  - [references/_index.md](references/_index.md)

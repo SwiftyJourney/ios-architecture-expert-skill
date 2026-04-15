@@ -1,5 +1,26 @@
 # SPM Project Structure
 
+Use this when:
+- You need to set up an SPM multi-target package for a modular iOS app
+- You need a `Package.swift` example with correct dependencies and resources
+- You need the dependency graph between modules
+- You need Swift 6 build settings for strict concurrency
+- You need CI/CD configuration for GitHub Actions
+
+Skip this file if:
+- You need to understand what code goes in each layer. Use `architecture-layers.md`.
+- You need Composition Root wiring. Use `composition-root.md`.
+
+Jump to:
+- [Module Layout](#module-layout)
+- [Package.swift Example](#packageswift-example)
+- [Build Settings](#build-settings--swift-6-strict-concurrency)
+- [Resource Declarations](#resource-declarations)
+- [Dependency Graph](#dependency-graph)
+- [CI/CD](#cicd-github-actions-example)
+
+---
+
 ## Module Layout
 
 ```
@@ -26,7 +47,9 @@ MyApp/
     └── SceneDelegate.swift
 ```
 
-**Key rule**: `Feature` and `FeatureAPI`/`FeatureCache` import only Foundation. `FeatureiOS` imports UIKit. `FeatureSwiftUI` imports SwiftUI. The app target imports everything — it is the only place where all modules converge.
+**Key rule**: `Feature` and `FeatureAPI`/`FeatureCache` import only Foundation. `FeatureCacheInfra` imports CoreData. `FeatureiOS` imports UIKit. `FeatureSwiftUI` imports SwiftUI. The app target imports everything — it is the only place where all modules converge.
+
+**Why `FeatureCacheInfra` is separate**: Infrastructure implementations (`CoreDataFeedStore`, `InMemoryFeedStore`) depend on specific frameworks (CoreData). Separating them from `FeatureCache` (which defines protocols and business logic) keeps the cache layer framework-free and testable with in-memory doubles.
 
 ---
 
@@ -43,6 +66,7 @@ let package = Package(
         .library(name: "EssentialFeed", targets: ["EssentialFeed"]),
         .library(name: "EssentialFeedAPI", targets: ["EssentialFeedAPI"]),
         .library(name: "EssentialFeedCache", targets: ["EssentialFeedCache"]),
+        .library(name: "EssentialFeedCacheInfra", targets: ["EssentialFeedCacheInfra"]),
         .library(name: "EssentialFeediOS", targets: ["EssentialFeediOS"]),
     ],
     targets: [
@@ -60,13 +84,20 @@ let package = Package(
             path: "Sources/FeatureAPI"
         ),
 
-        // Cache layer — depends on Feature for domain models
+        // Cache layer — depends on Feature for domain models (Foundation only)
         .target(
             name: "EssentialFeedCache",
             dependencies: ["EssentialFeed"],
-            path: "Sources/FeatureCache",
+            path: "Sources/FeatureCache"
+        ),
+
+        // Cache infrastructure — CoreData/InMemory implementations
+        .target(
+            name: "EssentialFeedCacheInfra",
+            dependencies: ["EssentialFeedCache"],
+            path: "Sources/FeatureCacheInfra",
             resources: [
-                .process("Infrastructure/CoreData/FeedStore.xcdatamodeld"),
+                .process("CoreData/FeedStore.xcdatamodeld"),
             ]
         ),
 
@@ -88,6 +119,13 @@ let package = Package(
             path: "Tests/FeatureTests"
         ),
 
+        // Cache infrastructure integration tests
+        .testTarget(
+            name: "EssentialFeedCacheInfraTests",
+            dependencies: ["EssentialFeedCacheInfra", "EssentialFeedCache"],
+            path: "Tests/FeatureCacheInfraTests"
+        ),
+
         // Snapshot tests
         .testTarget(
             name: "EssentialFeediOSTests",
@@ -100,6 +138,31 @@ let package = Package(
 
 ---
 
+## Build Settings — Swift 6 Strict Concurrency
+
+| Setting | SwiftPM (`Package.swift`) | Xcode (`.pbxproj`) | Why it matters |
+|---|---|---|---|
+| Language mode | `swift-tools-version: 6.0` | Swift Language Version = 6 | Enables strict concurrency by default |
+| Strict concurrency | Enabled by default in Swift 6 | `SWIFT_STRICT_CONCURRENCY = complete` | Compile-time data-race safety |
+| Upcoming features | `.enableUpcomingFeature("...")` in `swiftSettings` | `SWIFT_UPCOMING_FEATURE_*` | Opt-in to future language changes |
+
+For projects not yet on Swift 6, enable strict concurrency incrementally:
+
+```swift
+// In Package.swift targets
+.target(
+    name: "EssentialFeed",
+    dependencies: [],
+    swiftSettings: [
+        .enableExperimentalFeature("StrictConcurrency=complete")
+    ]
+)
+```
+
+Enable on **all targets** — Feature, API, Cache, CacheInfra, iOS, and App. Inconsistent settings across modules hide data-race issues at module boundaries.
+
+---
+
 ## Resource Declarations
 
 CoreData models and localization strings must be declared as SPM resources:
@@ -107,7 +170,7 @@ CoreData models and localization strings must be declared as SPM resources:
 ```swift
 // CoreData model
 resources: [
-    .process("Infrastructure/CoreData/FeedStore.xcdatamodeld"),
+    .process("CoreData/FeedStore.xcdatamodeld"),
 ]
 
 // Localization strings
@@ -137,15 +200,17 @@ NSLocalizedString("GENERIC_CONNECTION_ERROR",
 
 ```
 EssentialFeed (Foundation)
-    ↑
-    ├── EssentialFeedAPI (Foundation)
-    ├── EssentialFeedCache (Foundation + CoreData)
-    └── EssentialFeediOS (UIKit)
-            ↑
+    |
+    +-- EssentialFeedAPI (Foundation)
+    +-- EssentialFeedCache (Foundation)
+    |       |
+    |       +-- EssentialFeedCacheInfra (CoreData)
+    +-- EssentialFeediOS (UIKit)
+            |
             App Target (imports all — Composition Root)
 ```
 
-Dependencies flow **inward**: UI → Feature, Cache → Feature, API → Feature. The Feature module depends on nothing. The App target depends on everything but is the thinnest layer — just wiring.
+Dependencies flow **inward**: UI -> Feature, Cache -> Feature, API -> Feature. The Feature module depends on nothing. The App target depends on everything but is the thinnest layer — just wiring.
 
 ---
 
@@ -190,3 +255,21 @@ jobs:
 - `-enableThreadSanitizer YES`: Catches data races, especially important with `@Sendable` and `@MainActor` boundaries
 - `-resultBundlePath`: Captures detailed test results for CI artifacts
 - `macos-15` + Xcode 16: Ensures Swift 6 / iOS 18 compatibility
+
+---
+
+## Guardrails
+
+- Do not add UIKit/SwiftUI imports to Feature, API, or Cache targets
+- Do not skip `FeatureCacheInfra` — CoreData implementations belong in infrastructure, not in the cache layer
+- Do not mix test types in the same target — keep unit, integration, snapshot, and acceptance tests separate
+- Do not use `Bundle(for:)` in SPM targets — use `Bundle.module`
+
+## Verification
+
+- [ ] `swift-tools-version: 6.0` (or strict concurrency enabled via `swiftSettings`)
+- [ ] `Feature` target has zero dependencies
+- [ ] `FeatureAPI` and `FeatureCache` depend only on `Feature`
+- [ ] `FeatureCacheInfra` depends on `FeatureCache` and declares CoreData resources
+- [ ] All targets build with `SWIFT_STRICT_CONCURRENCY = complete` — zero warnings
+- [ ] CI runs with `-enableThreadSanitizer YES`

@@ -1,156 +1,23 @@
-# Composition & Adapters — Code Reference
+# Adapters & Proxies — Code Reference
 
-## Composition Root (`FeedService`)
+Use this when:
+- You need to wire a `LoadResourcePresentationAdapter` to a presenter
+- You need to break retain cycles with `WeakRefVirtualProxy`
+- You need to map domain models to cell controllers via `FeedViewAdapter`
+- You need to compose recursive pagination with `Paginated<Item>`
+- You need to understand the `CellController` type-erasure pattern
 
-The Composition Root is the **only place** that knows about all modules. It creates concrete instances, wires dependencies, and defines fallback strategies.
+Skip this file if:
+- You need to understand `FeedService` orchestration or `Scheduler`. Use `composition-root.md`.
+- You need concurrency rationale for `Task.immediate` or `@Sendable`. Use `concurrency-at-boundaries.md`.
 
-```swift
-@MainActor
-final class FeedService {
-    // Lazy init — defer expensive creation until first use
-    private lazy var httpClient: HTTPClient = {
-        URLSessionHTTPClient(session: URLSession(configuration: .ephemeral))
-    }()
-
-    private lazy var store: FeedStore & FeedImageDataStore & Scheduler & Sendable = {
-        do {
-            return try CoreDataFeedStore(
-                storeURL: NSPersistentContainer
-                    .defaultDirectoryURL()
-                    .appendingPathComponent("feed-store.sqlite"))
-        } catch {
-            assertionFailure("Failed to instantiate CoreData store: \(error.localizedDescription)")
-            logger.fault("Failed to instantiate CoreData store: \(error.localizedDescription)")
-            return InMemoryFeedStore()  // Fallback — graceful degradation
-        }
-    }()
-
-    private lazy var baseURL = URL(string: "https://ile-api.essentialdeveloper.com/essential-feed")!
-
-    // Convenience init for testing — inject all dependencies
-    convenience init(httpClient: HTTPClient,
-                     store: FeedStore & FeedImageDataStore & Scheduler & Sendable) {
-        self.init()
-        self.httpClient = httpClient
-        self.store = store
-    }
-}
-```
-
-**Key principles**:
-- `lazy` properties defer creation and allow override in tests via `convenience init`
-- Protocol composition (`FeedStore & FeedImageDataStore & Scheduler & Sendable`) constrains the store type at the wiring site
-- Fallback pattern: CoreData → InMemory on failure
-- `@MainActor` ensures all composition happens on the main thread
-
-### Remote-with-local-fallback pattern
-
-```swift
-func loadRemoteFeedWithLocalFallback() async throws -> Paginated<FeedImage> {
-    do {
-        let feed = try await loadAndCacheRemoteFeed()
-        return makeFirstPage(items: feed)
-    } catch {
-        let feed = try await loadLocalFeed()
-        return makeFirstPage(items: feed)
-    }
-}
-
-private func loadAndCacheRemoteFeed() async throws -> [FeedImage] {
-    let feed = try await loadRemoteFeed()
-    await store.schedule { [store] in
-        let loader = LocalFeedLoader(store: store, currentDate: Date.init)
-        try? loader.save(feed)
-    }
-    return feed
-}
-```
-
-### Scheduler protocol — abstract execution context
-
-```swift
-protocol Scheduler {
-    @MainActor
-    func schedule<T>(_ action: @escaping @Sendable () throws -> T) async rethrows -> T
-}
-
-// CoreData: dispatch to context queue
-extension CoreDataFeedStore: Scheduler {
-    @MainActor
-    func schedule<T>(_ action: @escaping @Sendable () throws -> T) async rethrows -> T {
-        if contextQueue == .main { return try action() }
-        else { return try await perform(action) }
-    }
-}
-
-// InMemory: execute immediately on main
-extension InMemoryFeedStore: Scheduler {
-    @MainActor
-    func schedule<T>(_ action: @escaping @Sendable () throws -> T) async rethrows -> T {
-        try action()
-    }
-}
-```
-
----
-
-## UI Composer — UIKit (`FeedUIComposer`)
-
-Static factory that wires the presenter→adapter→view chain for a feature. Returns a fully configured view controller.
-
-```swift
-@MainActor
-public final class FeedUIComposer {
-    private init() {}  // Static factory — no instances
-
-    public static func feedComposedWith(
-        feedLoader: @MainActor @escaping () async throws -> Paginated<FeedImage>,
-        imageLoader: @MainActor @escaping (URL) async throws -> Data,
-        selection: @MainActor @escaping (FeedImage) -> Void = { _ in }
-    ) -> ListViewController {
-        let presentationAdapter = LoadResourcePresentationAdapter<Paginated<FeedImage>, FeedViewAdapter>(
-            loader: feedLoader
-        )
-
-        let feedController = makeFeedViewController(title: FeedPresenter.title)
-        feedController.onRefresh = presentationAdapter.loadResource
-
-        presentationAdapter.presenter = LoadResourcePresenter(
-            resourceView: FeedViewAdapter(
-                controller: feedController,
-                imageLoader: imageLoader,
-                selection: selection),
-            loadingView: WeakRefVirtualProxy(feedController),
-            errorView: WeakRefVirtualProxy(feedController))
-
-        return feedController
-    }
-}
-```
-
-**Wiring chain**: `ListViewController.onRefresh` → `PresentationAdapter.loadResource` → async loader → `Presenter.didFinishLoading` → `FeedViewAdapter.display` → `ListViewController.display([CellController]...)`
-
----
-
-## UI Composer — SwiftUI Equivalent
-
-```swift
-@MainActor
-struct FeedUIComposer {
-    static func feedComposedWith(
-        feedLoader: @escaping () async throws -> Paginated<FeedImage>,
-        imageLoader: @escaping (URL) async throws -> Data,
-        selection: @escaping (FeedImage) -> Void = { _ in }
-    ) -> some View {
-        let viewModel = FeedViewModel(loader: feedLoader, imageLoader: imageLoader)
-
-        FeedView(viewModel: viewModel, selection: selection)
-            .task { await viewModel.load() }
-    }
-}
-```
-
-In SwiftUI, `@Observable` replaces the adapter→proxy→presenter chain. The view model directly holds loading/error/success state and SwiftUI observes mutations automatically. No `WeakRefVirtualProxy` needed — SwiftUI manages view lifecycle.
+Jump to:
+- [LoadResourcePresentationAdapter](#loadresourcepresentationadapter)
+- [WeakRefVirtualProxy](#weakrefvirtualproxy)
+- [FeedViewAdapter](#feedviewadapter)
+- [Paginated<Item>](#paginateditem)
+- [CellController](#cellcontroller--type-erased-cell-composition)
+- [Full Wiring Chain](#full-wiring-chain)
 
 ---
 
@@ -205,7 +72,13 @@ extension LoadResourcePresentationAdapter: FeedImageCellControllerDelegate {
 }
 ```
 
-**Key details**: `Task.immediate` ensures synchronous-first execution (important for avoiding unnecessary async hops). `[weak self]` prevents retain cycles. `isLoading` guard prevents duplicate requests. Cancellation on `deinit` cleans up in-flight tasks.
+**Key details**:
+- `Task.immediate` ensures `didStartLoading()` runs synchronously before the async work begins
+- `[weak self]` prevents retain cycles between the adapter and the task
+- `isLoading` guard prevents duplicate requests
+- `Task.isCancelled` checks after every `await` prevent stale results from reaching the presenter
+- `deinit` cancels in-flight tasks when the adapter is deallocated
+- `didCancelImageRequest()` provides explicit cancellation for prefetching
 
 ---
 
@@ -340,3 +213,82 @@ private func makePage(items: [FeedImage], last: FeedImage?) -> Paginated<FeedIma
 ```
 
 The `last` item determines if there are more pages. When `last` is `nil`, `loadMore` is `nil` — pagination ends. The closure captures `self` (the `FeedService`) to enable recursive page loading.
+
+---
+
+## `CellController` — Type-Erased Cell Composition
+
+Wraps any cell's data source, delegate, and prefetching behavior behind a single value:
+
+```swift
+public struct CellController {
+    let id: any Hashable & Sendable
+    let dataSource: UITableViewDataSource
+    let delegate: UITableViewDelegate?
+    let dataSourcePrefetching: UITableViewDataSourcePrefetching?
+
+    public init(id: any Hashable & Sendable, _ dataSource: UITableViewDataSource) {
+        self.id = id
+        self.dataSource = dataSource
+        self.delegate = dataSource as? UITableViewDelegate
+        self.dataSourcePrefetching = dataSource as? UITableViewDataSourcePrefetching
+    }
+}
+
+extension CellController: Equatable, Hashable {
+    // hash/compare by id — enables DiffableDataSource
+}
+```
+
+`CellController` enables `ListViewController` to manage any cell type through a uniform interface. The `id` property (typically the domain model itself, since it is `Hashable`) enables `DiffableDataSource` diffing.
+
+---
+
+## Full Wiring Chain
+
+```
+User pulls to refresh
+    |
+    v
+ListViewController.onRefresh
+    |
+    v
+LoadResourcePresentationAdapter.loadResource()
+    |  (1) presenter?.didStartLoading()  [synchronous via Task.immediate]
+    |  (2) loader()                      [async — calls FeedService]
+    v
+FeedService.loadRemoteFeedWithLocalFallback()
+    |  - tries remote, falls back to local
+    |  - returns Paginated<FeedImage>
+    v
+LoadResourcePresenter.didFinishLoading(with: resource)
+    |  - calls mapper (identity for Paginated)
+    v
+FeedViewAdapter.display(Paginated<FeedImage>)
+    |  - maps each FeedImage to CellController
+    |  - composes LoadMoreCellController if loadMore != nil
+    v
+ListViewController.display(feed, [loadMore])
+    |  - applies DiffableDataSource snapshot
+    v
+UITableView renders cells
+```
+
+---
+
+## Guardrails
+
+- Do not use bare `Task { }` in adapters — use `Task.immediate` for synchronous-first execution
+- Do not skip `Task.isCancelled` checks after `await` — stale results must not reach the presenter
+- Do not create adapters outside the Composition Root — they are wiring code, not business logic
+- Do not hold strong references from presenter to view — always use `WeakRefVirtualProxy` (UIKit)
+- Do not reuse `CellController` instances across different `FeedViewAdapter` lifetimes — let the `currentFeed` dictionary manage reuse within one page load cycle
+
+## Verification
+
+- [ ] Every `LoadResourcePresentationAdapter` checks `Task.isCancelled` after `await`
+- [ ] Every `WeakRefVirtualProxy` wraps a view that could outlive the presenter
+- [ ] `FeedViewAdapter` creates a new adapter instance for `loadMore` with forwarded `currentFeed`
+- [ ] `Paginated.loadMore` is `nil` for the last page (when `last` item is `nil`)
+- [ ] `CellController.id` uses the domain model (not an arbitrary UUID) for correct diffing
+- [ ] `deinit` in `LoadResourcePresentationAdapter` cancels in-flight tasks

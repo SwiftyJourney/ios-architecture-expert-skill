@@ -1,0 +1,52 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ios-architecture-expert-skill",
+  "version": "2.0.0",
+  "owner": {
+    "name": "SwiftyJourney",
+    "email": "jfdoradotr@icloud.com"
+  },
+  "metadata": {
+    "description": "Expert guidance for building modular, testable iOS/Swift apps following Essential Developer methodology. Clean architecture, composition root, generic presenters, and Swift 6 concurrency."
+  },
+  "plugins": [
+    {
+      "name": "ios-architecture-expert",
+      "description": "Expert guidance for building modular, testable iOS/Swift apps following Essential Developer methodology. Clean architecture with protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.",
+      "repository": "https://github.com/SwiftyJourney/ios-architecture-expert-skill",
+      "version": "2.0.0",
+      "author": {
+        "name": "SwiftyJourney",
+        "email": "jfdoradotr@icloud.com"
+      },
+      "license": "MIT",
+      "category": "development",
+      "keywords": [
+        "ios",
+        "swift",
+        "architecture",
+        "clean-architecture",
+        "essential-developer",
+        "composition-root",
+        "tdd",
+        "protocol-oriented",
+        "spm",
+        "swift6",
+        "sendable",
+        "main-actor",
+        "modular",
+        "apple-platforms"
+      ],
+      "tags": [
+        "ios",
+        "swift",
+        "architecture",
+        "clean-architecture",
+        "tdd",
+        "swift6",
+        "apple-platforms"
+      ],
+      "source": "./"
+    }
+  ]
+}

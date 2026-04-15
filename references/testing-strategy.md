@@ -1,5 +1,26 @@
 # Testing Strategy — Five Layers
 
+Use this when:
+- You need to write tests for a use case, store implementation, or UI composition
+- You need the `makeSUT()` pattern, spy collaborators, or memory leak tracking
+- You need the specification pattern for shared store contracts
+- You need the generic async test spy (`LoaderSpy`)
+- You need snapshot or acceptance test patterns
+
+Skip this file if:
+- You need general Swift Testing patterns (`@Test`, `#expect`). Use the `swift-testing-expert` skill.
+- You need architecture layer details. Use `architecture-layers.md`.
+
+Jump to:
+- [Unit Tests](#1-unit-tests)
+- [Specification Pattern](#2-specification-pattern-shared-store-specs)
+- [Integration Tests](#3-integration-tests)
+- [Snapshot Tests](#4-snapshot-tests)
+- [Acceptance Tests](#5-acceptance-tests)
+- [Generic Async Test Spy](#generic-async-test-spy-loaderspy)
+
+---
+
 ## 1. Unit Tests
 
 Every use case gets its own test class named by behavior. Tests follow a strict structure: `makeSUT()` factory, spy collaborators, `expect` helpers.
@@ -158,6 +179,11 @@ protocol FailableDeleteFeedStoreSpecs: FeedStoreSpecs {
     func test_delete_deliversErrorOnDeletionError() async throws
     func test_delete_hasNoSideEffectsOnDeletionError() async throws
 }
+
+// Composite protocol — all failable specs
+typealias FailableFeedStoreSpecs = FailableRetrieveFeedStoreSpecs
+    & FailableInsertFeedStoreSpecs
+    & FailableDeleteFeedStoreSpecs
 ```
 
 ### Shared assertion functions (free functions in extensions)
@@ -195,18 +221,26 @@ extension FeedStoreSpecs where Self: XCTestCase {
 **Concrete test class** just calls the shared assertions:
 
 ```swift
-class CoreDataFeedStoreTests: XCTestCase, FeedStoreSpecs, FailableRetrieveFeedStoreSpecs,
-    FailableInsertFeedStoreSpecs, FailableDeleteFeedStoreSpecs {
-
+// CoreData implements the full failable spec
+class CoreDataFeedStoreTests: XCTestCase, FailableFeedStoreSpecs {
     func test_retrieve_deliversEmptyOnEmptyCache() async throws {
         let sut = try makeSUT()
         assertThatRetrieveDeliversEmptyOnEmptyCache(on: sut)
     }
     // ... each spec method delegates to shared assertion
 }
+
+// InMemory implements only the base spec (no failure modes)
+class InMemoryFeedStoreTests: XCTestCase, FeedStoreSpecs {
+    func test_retrieve_deliversEmptyOnEmptyCache() async throws {
+        let sut = InMemoryFeedStore()
+        assertThatRetrieveDeliversEmptyOnEmptyCache(on: sut)
+    }
+    // ... each spec method delegates to shared assertion
+}
 ```
 
-**Benefit**: Add a new `FeedStore` implementation (e.g., `RealmFeedStore`) → conform to `FeedStoreSpecs` → get all contract tests for free.
+**Benefit**: Add a new `FeedStore` implementation (e.g., `RealmFeedStore`) -> conform to `FeedStoreSpecs` -> get all contract tests for free.
 
 ---
 
@@ -271,7 +305,7 @@ class FeedSnapshotTests: XCTestCase {
 }
 ```
 
-**Test matrix**: Each visual state × (light, dark) × accessibility sizes. Use `ImageStub` helpers to provide controlled display data without network calls.
+**Test matrix**: Each visual state x (light, dark) x accessibility sizes. Use `ImageStub` helpers to provide controlled display data without network calls.
 
 ---
 
@@ -295,7 +329,7 @@ class FeedAcceptanceTests: XCTestCase {
         let onlineFeed = try await launch(httpClient: .online(response), store: .empty)
         onlineFeed.simulateFeedImageViewVisible(at: 0)
 
-        // Second launch: offline → shows cached data
+        // Second launch: offline — shows cached data
         let offlineFeed = try await launch(httpClient: .offline, store: onlineFeed.store)
         XCTAssertEqual(offlineFeed.numberOfRenderedFeedImageViews(), 2)
     }
@@ -326,7 +360,6 @@ class FeedAcceptanceTests: XCTestCase {
 
 ```swift
 class HTTPClientStub: HTTPClient {
-    private class Task: HTTPClientTask { func cancel() {} }
     private let stub: (URL) -> Result<(Data, HTTPURLResponse), Error>
 
     static var offline: HTTPClientStub {
@@ -342,3 +375,142 @@ class HTTPClientStub: HTTPClient {
     }
 }
 ```
+
+### InMemoryFeedStore factory extensions
+
+```swift
+extension InMemoryFeedStore {
+    static var empty: InMemoryFeedStore { InMemoryFeedStore() }
+}
+```
+
+The same `InMemoryFeedStore` instance is passed between simulated "launches" to verify cache persistence across app lifecycle events.
+
+---
+
+## Generic Async Test Spy (`LoaderSpy`)
+
+A generic, reusable test spy for async loaders using `AsyncThrowingStream`. Used in UI integration tests to control async completion timing.
+
+```swift
+@MainActor
+class LoaderSpy<Param, Resource: Sendable> {
+    private(set) var requests = [(
+        param: Param,
+        stream: AsyncThrowingStream<Resource, Error>,
+        continuation: AsyncThrowingStream<Resource, Error>.Continuation,
+        result: AsyncResult?
+    )]()
+
+    private struct NoResponse: Error {}
+    private struct Timeout: Error {}
+
+    func load(_ param: Param) async throws -> Resource {
+        let (stream, continuation) = AsyncThrowingStream<Resource, Error>.makeStream()
+        let index = requests.count
+        requests.append((param, stream, continuation, nil))
+
+        do {
+            for try await result in stream {
+                try Task.checkCancellation()
+                requests[index].result = .success
+                return result
+            }
+
+            try Task.checkCancellation()
+
+            throw NoResponse()
+        } catch {
+            requests[index].result = Task.isCancelled ? .cancelled : .failure
+            throw error
+        }
+    }
+
+    func complete(with resource: Resource, at index: Int) async {
+        requests[index].continuation.yield(resource)
+        requests[index].continuation.finish()
+
+        while requests[index].result == nil { await Task.yield() }
+    }
+
+    func fail(with error: Error, at index: Int) async {
+        requests[index].continuation.finish(throwing: error)
+
+        while requests[index].result == nil { await Task.yield() }
+    }
+
+    func result(at index: Int, timeout: TimeInterval = 1) async throws -> AsyncResult {
+        let maxDate = Date() + timeout
+
+        while Date() <= maxDate {
+            if let result = requests[index].result {
+                return result
+            }
+
+            await Task.yield()
+        }
+
+        throw Timeout()
+    }
+
+    func cancelPendingRequests() async throws {
+        for (index, request) in requests.enumerated() where request.result == nil {
+            request.continuation.finish(throwing: CancellationError())
+
+            while requests[index].result == nil { await Task.yield() }
+        }
+    }
+}
+
+enum AsyncResult {
+    case success
+    case failure
+    case cancelled
+}
+```
+
+**Key features**:
+- `@MainActor` — matches the isolation of UI integration tests
+- `AsyncThrowingStream` — gives test control over when results arrive
+- `complete(with:at:)` and `fail(with:at:)` — test drives async completion
+- `while result == nil { await Task.yield() }` — waits for the async consumer to process the result
+- `result(at:timeout:)` — asserts the outcome with a timeout guard
+- `cancelPendingRequests()` — cleans up in-flight streams
+
+### Usage in UI integration tests
+
+```swift
+// Specialized spy for feed loading
+typealias FeedLoaderSpy = LoaderSpy<Void, Paginated<FeedImage>>
+typealias ImageLoaderSpy = LoaderSpy<URL, Data>
+
+// In test
+func test_loadFeedCompletion_rendersSuccessfullyLoadedFeed() async {
+    let (sut, loader) = makeSUT()
+
+    sut.simulateAppearance()
+    await loader.complete(with: Paginated(items: [image0, image1]), at: 0)
+
+    XCTAssertEqual(sut.numberOfRenderedFeedImageViews(), 2)
+}
+```
+
+---
+
+## Guardrails
+
+- Use `makeSUT()` in every test class — never share a `sut` across tests
+- Use enum-based message recording in spies — not boolean flags
+- Use `trackForMemoryLeaks` in XCTest for all reference-type SUTs and collaborators
+- Name test classes by behavior (`CacheFeedUseCaseTests`), not by implementation (`LocalFeedLoaderTests`)
+- Do not mock infrastructure in integration tests — use the real CoreData stack
+
+## Verification
+
+- [ ] Every test class has a `makeSUT()` factory method
+- [ ] Every `makeSUT()` in XCTest calls `trackForMemoryLeaks` on reference types
+- [ ] Spy collaborators use `enum ReceivedMessage` for method recording
+- [ ] Store implementations conform to the appropriate `FeedStoreSpecs` protocol
+- [ ] Integration tests use separate `sutToSave` and `sutToLoad` instances
+- [ ] Acceptance tests inject dependencies via `SceneDelegate` convenience init
+- [ ] Snapshot tests cover light mode, dark mode, and accessibility sizes

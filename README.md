@@ -11,6 +11,7 @@ iOS developers who want AI-assisted guidance on:
 - Writing testable code with protocol boundaries
 - Building reusable presentation logic with generic presenters
 - Applying modern Swift concurrency (async/await, `Sendable`, `@MainActor`)
+- Enabling Swift 6 strict concurrency across all modules
 
 ## Installation
 
@@ -41,37 +42,45 @@ npx skills add swiftyjourney/ios-architecture-expert-skill
 
 ### Composition Patterns
 
-- `FeedService` — Composition Root with lazy init and fallback strategy
-- `FeedUIComposer` — Static factory wiring presenter→adapter→view chains
-- `LoadResourcePresentationAdapter` — Generic async loader with cancellation
+- `FeedService` — `@MainActor` orchestrator with lazy init, Scheduler, and fallback strategy
+- `FeedUIComposer` — Static factory wiring presenter->adapter->view chains
+- `LoadResourcePresentationAdapter` — Generic async loader with `Task.immediate` and cancellation
 - `WeakRefVirtualProxy` — Retain cycle prevention via conditional conformance
-- `Paginated<Item>` — Recursive pagination model
+- `Paginated<Item>` — Recursive pagination model with `@Sendable` `loadMore`
+- `Scheduler` protocol — Abstract CoreData/InMemory execution context
+- `InMemoryFeedStore` — `@MainActor` production fallback + acceptance test double
 
 ### Testing Strategy
 
 - Unit tests with `makeSUT()` factory and spy collaborators
+- Generic async test spy (`LoaderSpy`) with `AsyncThrowingStream`
 - Specification pattern for shared store contract tests
 - Integration tests with real CoreData stack
 - Snapshot tests (light/dark mode + accessibility sizes)
 - Acceptance tests with full DI container
 
-### Modernization
+### Concurrency at Architecture Boundaries
 
-- SPM multi-target packages over xcframework
-- Swift Testing (`@Test`, `#expect`) over XCTest
-- async/await over closures/Combine
-- Both UIKit and SwiftUI composition examples
+- `@MainActor` placement rules (presenters, adapters, composition — not domain types)
+- `@Sendable` closures at composition boundaries
+- `Task.immediate` for synchronous-first execution
+- `async let` for parallel loading in the Composition Root
+- Cancellation handling in adapters
+- Swift 6 strict concurrency (`SWIFT_STRICT_CONCURRENCY = complete`)
 
 ## Skill File Structure
 
 ```
-SKILL.md                              # Hub (~200 lines)
+SKILL.md                                 # Hub (~180 lines)
 references/
-├── architecture-layers.md            # Layer-by-layer patterns with code
-├── composition-and-adapters.md       # Composition Root, proxies, adapters
-├── testing-strategy.md               # 5-layer test strategy
-├── feature-implementation-workflow.md # Step-by-step feature building
-└── spm-project-structure.md          # SPM module layout + CI
+├── _index.md                            # Navigation hub
+├── architecture-layers.md               # Layer-by-layer patterns with code
+├── composition-root.md                  # FeedService, Scheduler, fallback, SceneDelegate
+├── adapters-and-proxies.md              # Adapters, proxies, pagination wiring
+├── concurrency-at-boundaries.md         # Concurrency patterns at architectural boundaries
+├── testing-strategy.md                  # 5-layer test strategy + generic async spy
+├── feature-implementation-workflow.md   # Step-by-step feature building
+└── spm-project-structure.md             # SPM module layout + Swift 6 settings + CI
 ```
 
 ## Related Skills
