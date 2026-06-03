@@ -2,7 +2,7 @@
 
 Use this when:
 - You are building a feature end-to-end from scratch
-- You need a step-by-step checklist for the Essential Developer methodology
+- You need a step-by-step checklist for the clean architecture methodology
 - You need to know the correct order of implementation (BDD -> domain -> API -> cache -> presentation -> UI -> composition -> tests)
 
 Skip this file if:
@@ -53,7 +53,7 @@ Scenario: Customer has no connectivity
 ## Step 2: Create Domain Model (Feature Layer)
 
 ```swift
-// EssentialFeed/Feature/FeedImage.swift
+// Feed/Feature/FeedImage.swift
 public struct FeedImage: Hashable, Sendable {
     public let id: UUID
     public let description: String?
@@ -102,13 +102,13 @@ public protocol FeedStore {
 ## Step 4: Build API Endpoint + Mapper
 
 ```swift
-// EssentialFeed/API/FeedEndpoint.swift
+// Feed/API/FeedEndpoint.swift
 public enum FeedEndpoint {
     case get(after: FeedImage? = nil)
     public func url(baseURL: URL) -> URL { ... }
 }
 
-// EssentialFeed/API/FeedItemsMapper.swift
+// Feed/API/FeedItemsMapper.swift
 public final class FeedItemsMapper {
     private struct Root: Decodable { ... }
     public enum Error: Swift.Error { case invalidData }
@@ -130,22 +130,22 @@ Checklist:
 ## Step 5: Build Cache Layer
 
 ```swift
-// EssentialFeed/Cache/FeedStore.swift (protocol)
+// Feed/Cache/FeedStore.swift (protocol)
 public protocol FeedStore {
     func deleteCachedFeed() throws
     func insert(_ feed: [LocalFeedImage], timestamp: Date) throws
     func retrieve() throws -> CachedFeed?
 }
 
-// EssentialFeed/Cache/LocalFeedImage.swift (cache model)
+// Feed/Cache/LocalFeedImage.swift (cache model)
 public struct LocalFeedImage: Equatable { ... }
 
-// EssentialFeed/Cache/LocalFeedLoader.swift (orchestrator)
+// Feed/Cache/LocalFeedLoader.swift (orchestrator)
 public final class LocalFeedLoader {
     public init(store: FeedStore, currentDate: @escaping () -> Date)
 }
 
-// EssentialFeed/Cache/FeedCachePolicy.swift (business rule)
+// Feed/Cache/FeedCachePolicy.swift (business rule)
 final class FeedCachePolicy {
     static func validate(_ timestamp: Date, against date: Date) -> Bool
 }
@@ -166,7 +166,7 @@ Checklist:
 ## Step 6: Build Presentation Layer
 
 ```swift
-// EssentialFeed/Presentation/LoadResourcePresenter.swift
+// Feed/Presentation/LoadResourcePresenter.swift
 @MainActor
 public final class LoadResourcePresenter<Resource, View: ResourceView> {
     public func didStartLoading()
@@ -174,7 +174,7 @@ public final class LoadResourcePresenter<Resource, View: ResourceView> {
     public func didFinishLoading(with error: Error)
 }
 
-// EssentialFeed/Presentation/FeedImagePresenter.swift
+// Feed/Presentation/FeedImagePresenter.swift
 public final class FeedImagePresenter {
     public static func map(_ image: FeedImage) -> FeedImageViewModel { ... }
 }
@@ -200,7 +200,7 @@ Checklist:
 ### UIKit path:
 
 ```swift
-// EssentialFeediOS/FeedImageCellController.swift
+// FeediOS/FeedImageCellController.swift
 public final class FeedImageCellController: NSObject,
     UITableViewDataSource, UITableViewDelegate, UITableViewDataSourcePrefetching,
     ResourceView, ResourceLoadingView, ResourceErrorView { ... }
@@ -209,7 +209,7 @@ public final class FeedImageCellController: NSObject,
 ### SwiftUI path:
 
 ```swift
-// EssentialFeediOS/FeedImageRow.swift
+// FeediOS/FeedImageRow.swift
 struct FeedImageRow: View {
     let viewModel: FeedImageViewModel
     @State var imageData: Data?
@@ -227,7 +227,7 @@ Checklist:
 ## Step 8: Wire in Composition Root
 
 ```swift
-// EssentialApp/FeedUIComposer.swift
+// App/FeedUIComposer.swift
 public static func feedComposedWith(
     feedLoader: @escaping () async throws -> Paginated<FeedImage>,
     imageLoader: @escaping (URL) async throws -> Data,

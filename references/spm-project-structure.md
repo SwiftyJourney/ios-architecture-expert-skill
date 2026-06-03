@@ -60,41 +60,41 @@ MyApp/
 import PackageDescription
 
 let package = Package(
-    name: "EssentialFeed",
+    name: "Feed",
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
-        .library(name: "EssentialFeed", targets: ["EssentialFeed"]),
-        .library(name: "EssentialFeedAPI", targets: ["EssentialFeedAPI"]),
-        .library(name: "EssentialFeedCache", targets: ["EssentialFeedCache"]),
-        .library(name: "EssentialFeedCacheInfra", targets: ["EssentialFeedCacheInfra"]),
-        .library(name: "EssentialFeediOS", targets: ["EssentialFeediOS"]),
+        .library(name: "Feed", targets: ["Feed"]),
+        .library(name: "FeedAPI", targets: ["FeedAPI"]),
+        .library(name: "FeedCache", targets: ["FeedCache"]),
+        .library(name: "FeedCacheInfra", targets: ["FeedCacheInfra"]),
+        .library(name: "FeediOS", targets: ["FeediOS"]),
     ],
     targets: [
         // Feature layer — Foundation only
         .target(
-            name: "EssentialFeed",
+            name: "Feed",
             dependencies: [],
             path: "Sources/Feature"
         ),
 
         // API layer — depends on Feature for domain models
         .target(
-            name: "EssentialFeedAPI",
-            dependencies: ["EssentialFeed"],
+            name: "FeedAPI",
+            dependencies: ["Feed"],
             path: "Sources/FeatureAPI"
         ),
 
         // Cache layer — depends on Feature for domain models (Foundation only)
         .target(
-            name: "EssentialFeedCache",
-            dependencies: ["EssentialFeed"],
+            name: "FeedCache",
+            dependencies: ["Feed"],
             path: "Sources/FeatureCache"
         ),
 
         // Cache infrastructure — CoreData/InMemory implementations
         .target(
-            name: "EssentialFeedCacheInfra",
-            dependencies: ["EssentialFeedCache"],
+            name: "FeedCacheInfra",
+            dependencies: ["FeedCache"],
             path: "Sources/FeatureCacheInfra",
             resources: [
                 .process("CoreData/FeedStore.xcdatamodeld"),
@@ -103,8 +103,8 @@ let package = Package(
 
         // iOS UI layer — depends on Feature for view models
         .target(
-            name: "EssentialFeediOS",
-            dependencies: ["EssentialFeed"],
+            name: "FeediOS",
+            dependencies: ["Feed"],
             path: "Sources/FeatureiOS",
             resources: [
                 .process("Feed UI/Feed.storyboard"),
@@ -114,22 +114,22 @@ let package = Package(
 
         // Unit tests
         .testTarget(
-            name: "EssentialFeedTests",
-            dependencies: ["EssentialFeed", "EssentialFeedAPI", "EssentialFeedCache"],
+            name: "FeedTests",
+            dependencies: ["Feed", "FeedAPI", "FeedCache"],
             path: "Tests/FeatureTests"
         ),
 
         // Cache infrastructure integration tests
         .testTarget(
-            name: "EssentialFeedCacheInfraTests",
-            dependencies: ["EssentialFeedCacheInfra", "EssentialFeedCache"],
+            name: "FeedCacheInfraTests",
+            dependencies: ["FeedCacheInfra", "FeedCache"],
             path: "Tests/FeatureCacheInfraTests"
         ),
 
         // Snapshot tests
         .testTarget(
-            name: "EssentialFeediOSTests",
-            dependencies: ["EssentialFeediOS", "EssentialFeed"],
+            name: "FeediOSTests",
+            dependencies: ["FeediOS", "Feed"],
             path: "Tests/FeatureiOSTests"
         ),
     ]
@@ -151,7 +151,7 @@ For projects not yet on Swift 6, enable strict concurrency incrementally:
 ```swift
 // In Package.swift targets
 .target(
-    name: "EssentialFeed",
+    name: "Feed",
     dependencies: [],
     swiftSettings: [
         .enableExperimentalFeature("StrictConcurrency=complete")
@@ -199,13 +199,13 @@ NSLocalizedString("GENERIC_CONNECTION_ERROR",
 ## Dependency Graph
 
 ```
-EssentialFeed (Foundation)
+Feed (Foundation)
     |
-    +-- EssentialFeedAPI (Foundation)
-    +-- EssentialFeedCache (Foundation)
+    +-- FeedAPI (Foundation)
+    +-- FeedCache (Foundation)
     |       |
-    |       +-- EssentialFeedCacheInfra (CoreData)
-    +-- EssentialFeediOS (UIKit)
+    |       +-- FeedCacheInfra (CoreData)
+    +-- FeediOS (UIKit)
             |
             App Target (imports all — Composition Root)
 ```
@@ -237,7 +237,7 @@ jobs:
       - name: Run tests
         run: |
           xcodebuild test \
-            -scheme EssentialFeed \
+            -scheme Feed \
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
             -enableThreadSanitizer YES \
             -resultBundlePath TestResults.xcresult

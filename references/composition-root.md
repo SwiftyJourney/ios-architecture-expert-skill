@@ -35,7 +35,7 @@ final class FeedService {
         URLSessionHTTPClient(session: URLSession(configuration: .ephemeral))
     }()
 
-    private lazy var logger = Logger(subsystem: "com.essentialdeveloper.EssentialAppCaseStudy", category: "main")
+    private lazy var logger = Logger(subsystem: "com.example.FeedApp", category: "main")
 
     private lazy var store: FeedStore & FeedImageDataStore & Scheduler & Sendable = {
         do {
@@ -50,7 +50,7 @@ final class FeedService {
         }
     }()
 
-    private lazy var baseURL = URL(string: "https://ile-api.essentialdeveloper.com/essential-feed")!
+    private lazy var baseURL = URL(string: "https://api.example.com/feed")!
 
     // Convenience init for testing — inject all dependencies
     convenience init(httpClient: HTTPClient,

@@ -1,7 +1,7 @@
 {
   "name": "ios-architecture-expert",
   "version": "2.0.0",
-  "description": "Expert guidance for building modular, testable iOS/Swift apps following Essential Developer methodology. Clean architecture with protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.",
+  "description": "Expert guidance for building modular, testable iOS/Swift apps following a clean architecture methodology. Protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.",
   "author": {
     "name": "SwiftyJourney",
     "email": "jfdoradotr@icloud.com"
@@ -13,7 +13,6 @@
     "swift",
     "architecture",
     "clean-architecture",
-    "essential-developer",
     "composition-root",
     "tdd",
     "protocol-oriented",

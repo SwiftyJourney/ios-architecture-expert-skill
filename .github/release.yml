@@ -34,7 +34,7 @@ jobs:
           body: |
             ## iOS Architecture Expert Skill
 
-            Guides building modular, testable iOS/Swift applications following the Essential Developer methodology — clean architecture with protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.
+            Guides building modular, testable iOS/Swift applications following a clean architecture methodology — protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.
 
             ### Installation
 

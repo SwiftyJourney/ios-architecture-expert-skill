@@ -1,14 +1,14 @@
 ---
 name: ios-architecture-expert
 description: >
-  Guides building modular, testable iOS/Swift applications following the
-  Essential Developer methodology -- clean architecture with protocol-oriented
-  design, composition root, generic presenters, and modern Swift concurrency.
+  Guides building modular, testable iOS/Swift applications following a
+  clean architecture methodology -- protocol-oriented design, composition
+  root, generic presenters, and modern Swift concurrency.
   Use when designing features, structuring modules, composing dependencies,
   or reviewing iOS architecture.
 ---
 
-# iOS Architecture Expert — Essential Developer Methodology
+# iOS Architecture Expert — Clean Modular Architecture
 
 ## Agent Behavior Contract
 
@@ -20,7 +20,7 @@ When this skill is active, follow these rules **strictly**:
 4. **Presentation logic is framework-agnostic** — presenters output view models (structs). No `UIImage`, `UIColor`, or SwiftUI types in the presentation layer.
 5. **All dependency wiring happens in the Composition Root** — the app target (or a dedicated `CompositionRoot` module). Feature modules never create their own dependencies.
 6. **Tests drive the design** — one test class per use case, named by behavior (`CacheFeedUseCaseTests`, not `LocalFeedLoaderTests`). Use `makeSUT()` factory in every test class.
-7. **Use SPM multi-target packages** for module separation — `EssentialFeed` (Foundation), `EssentialFeediOS` (UIKit), `EssentialApp` (composition).
+7. **Use SPM multi-target packages** for module separation — `Feed` (Foundation), `FeediOS` (UIKit), `App` (composition).
 8. **Prefer async/await over closures/Combine** for async operations. Use `Task.immediate` for synchronous-first execution in adapters.
 9. **Use Swift Testing** (`@Test`, `#expect`) for new tests. Follow patterns in the `swift-testing-expert` skill when available.
 10. **Mark shared mutable state with `@MainActor`** — presenters, adapters, view controllers, and composition code run on the main actor.

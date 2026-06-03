@@ -1,6 +1,6 @@
 # iOS Architecture Expert Skill
 
-A Claude Code skill that guides building modular, testable iOS/Swift applications following the [Essential Developer](https://www.essentialdeveloper.com) methodology — clean architecture with protocol-oriented design, composition root patterns, generic presenters, and modern Swift concurrency.
+A Claude Code skill that guides building modular, testable iOS/Swift applications following a clean architecture methodology — protocol-oriented design, composition root patterns, generic presenters, and modern Swift concurrency.
 
 ## Who is this for?
 
@@ -89,7 +89,7 @@ references/
 
 ## Credits
 
-Architecture patterns extracted from the [iOS Lead Essentials](https://www.essentialdeveloper.com/ios-lead-essentials) program by [Essential Developer](https://www.essentialdeveloper.com). Code examples adapted and modernized for Swift 6 / iOS 18+.
+Built on well-established clean architecture, TDD, and modular design practices from the iOS community. Code examples written for Swift 6 / iOS 18+.
 
 ## License
 
