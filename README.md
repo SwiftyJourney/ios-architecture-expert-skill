@@ -71,16 +71,16 @@ npx skills add swiftyjourney/ios-architecture-expert-skill
 ## Skill File Structure
 
 ```
-SKILL.md                                 # Hub (~180 lines)
+SKILL.md                                 # Hub + diagnostic table + gotchas + reference router
 references/
-├── _index.md                            # Navigation hub
 ├── architecture-layers.md               # Layer-by-layer patterns with code
 ├── composition-root.md                  # FeedService, Scheduler, fallback, SceneDelegate
-├── adapters-and-proxies.md              # Adapters, proxies, pagination wiring
-├── concurrency-at-boundaries.md         # Concurrency patterns at architectural boundaries
+├── adapters-and-proxies.md              # Adapters, proxies, pagination, cell lifecycle
+├── concurrency-at-boundaries.md         # Concurrency at boundaries + async migration playbook
 ├── testing-strategy.md                  # 5-layer test strategy + generic async spy
-├── feature-implementation-workflow.md   # Step-by-step feature building
+├── feature-implementation-workflow.md   # Step-by-step feature building + duplicate-then-generalize
 └── spm-project-structure.md             # SPM module layout + Swift 6 settings + CI
+evals/                                   # Trigger eval queries + output-quality test cases
 ```
 
 ## Related Skills

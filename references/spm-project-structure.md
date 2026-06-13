@@ -19,6 +19,8 @@ Jump to:
 - [Dependency Graph](#dependency-graph)
 - [CI/CD](#cicd-github-actions-example)
 
+> The case study itself ships as **two Xcode projects + a workspace**, not a Swift package. This file is the recommended SPM-equivalent of that layout — use it when you want package-based modularity; the boundary rules are identical either way.
+
 ---
 
 ## Module Layout
@@ -61,7 +63,10 @@ import PackageDescription
 
 let package = Package(
     name: "Feed",
-    platforms: [.iOS(.v17), .macOS(.v14)],
+    // NOTE: the concurrency patterns in this skill (e.g. `Task.immediate`) need a Swift 6.2-era
+    // toolchain and a recent deployment target. Do not pair them with .iOS(.v17) — bump the
+    // platforms to match, or fall back to plain `Task` (see concurrency-at-boundaries.md).
+    platforms: [.iOS(.v26), .macOS(.v15)],
     products: [
         .library(name: "Feed", targets: ["Feed"]),
         .library(name: "FeedAPI", targets: ["FeedAPI"]),
@@ -161,6 +166,8 @@ For projects not yet on Swift 6, enable strict concurrency incrementally:
 
 Enable on **all targets** — Feature, API, Cache, CacheInfra, iOS, and App. Inconsistent settings across modules hide data-race issues at module boundaries.
 
+> Compiling the core package (Feature/API/Cache/Presentation) for **both macOS and iOS** is the cheapest enforcement of zero UIKit imports — a second platform fails to build the moment a UI framework leaks into a framework-free layer.
+
 ---
 
 ## Resource Declarations
@@ -217,44 +224,29 @@ Dependencies flow **inward**: UI -> Feature, Cache -> Feature, API -> Feature. T
 ## CI/CD GitHub Actions Example
 
 ```yaml
-name: CI
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
 jobs:
   test:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -s /Applications/Xcode_16.app
-
       - name: Run tests
         run: |
-          xcodebuild test \
-            -scheme Feed \
+          xcodebuild test -scheme Feed \
             -destination 'platform=iOS Simulator,name=iPhone 16,OS=latest' \
             -enableThreadSanitizer YES \
             -resultBundlePath TestResults.xcresult
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: TestResults
-          path: TestResults.xcresult
 ```
 
-**Key flags**:
+**Key flags / settings**:
 
-- `-enableThreadSanitizer YES`: Catches data races, especially important with `@Sendable` and `@MainActor` boundaries
-- `-resultBundlePath`: Captures detailed test results for CI artifacts
-- `macos-15` + Xcode 16: Ensures Swift 6 / iOS 18 compatibility
+| Flag / setting | Where | Why |
+|---|---|---|
+| `-enableThreadSanitizer YES` | CI `xcodebuild` invocation, **not** the shared scheme | Catches data races at `@Sendable`/`@MainActor` boundaries. Keep it out of the shared scheme — duplicating it there triggers a duplicate-path warning. |
+| `-com.apple.CoreData.ConcurrencyDebug 1` | test scheme arguments | Hard-fails on any CoreData context-queue violation. |
+| Randomized test order | test scheme | Surfaces hidden inter-test ordering/shared-state dependencies. |
+| Code coverage enabled | test scheme | Required for coverage artifacts. |
+
+End-to-end API tests get their own CI-only scheme so they never run in the fast dev loop.
 
 ---
 

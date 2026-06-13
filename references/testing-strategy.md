@@ -13,11 +13,15 @@ Skip this file if:
 
 Jump to:
 - [Unit Tests](#1-unit-tests)
+- [Extracting a Protocol Boundary](#extracting-a-protocol-boundary)
 - [Specification Pattern](#2-specification-pattern-shared-store-specs)
 - [Integration Tests](#3-integration-tests)
+- [HTTPClient Infrastructure Tests](#testing-the-httpclient-infrastructure-urlprotocol-stubbing)
+- [End-to-End API Tests](#end-to-end-api-tests)
 - [Snapshot Tests](#4-snapshot-tests)
 - [Acceptance Tests](#5-acceptance-tests)
 - [Generic Async Test Spy](#generic-async-test-spy-loaderspy)
+- [Cross-Cutting Patterns](#cross-cutting-patterns)
 
 ---
 
@@ -54,27 +58,7 @@ class CacheFeedUseCaseTests: XCTestCase {
 }
 ```
 
-```swift
-// Swift Testing equivalent
-@Suite @MainActor
-struct CacheFeedUseCaseTests {
-    @Test func save_requestsNewCacheInsertionWithTimestampOnSuccessfulDeletion() {
-        let timestamp = Date()
-        let feed = uniqueImageFeed()
-        let (sut, store) = makeSUT(currentDate: { timestamp })
-
-        try? sut.save(feed.models)
-
-        #expect(store.receivedMessages == [.deleteCachedFeed, .insert(feed.local, timestamp)])
-    }
-
-    private func makeSUT(currentDate: @escaping () -> Date = Date.init) -> (sut: LocalFeedLoader, store: FeedStoreSpy) {
-        let store = FeedStoreSpy()
-        let sut = LocalFeedLoader(store: store, currentDate: currentDate)
-        return (sut, store)
-    }
-}
-```
+**Swift Testing delta**: `struct` suites get a fresh instance per test, but `addTeardownBlock`/`trackForMemoryLeaks` is XCTest-only with no direct equivalent. For `@Test`/`#expect` syntax, defer to the `swift-testing-expert` skill.
 
 ### Spy with `receivedMessages` enum
 
@@ -115,6 +99,11 @@ class FeedStoreSpy: FeedStore {
 
 **Pattern**: Enum-based message recording captures method calls AND arguments. Separate stub methods configure return values. This keeps assertions on **what happened** separate from **how to respond**.
 
+Refinements:
+- Capture completions instead of stubbing eager responses — the test decides when and how many times a result is delivered. This is what enables "does not deliver result after deallocation/cancellation" tests.
+- Record messages in an `Array` when call ORDER is the contract (delete-then-insert); in a `Set` when order is incidental (presenter view messages), so reordering display calls doesn't break tests.
+- Dealloc/cancellation test pattern: create the SUT as an optional, start the operation capturing results, nil the SUT (or cancel), THEN complete the spy, assert nothing was delivered. UIKit deinit tests need `autoreleasepool { }` around SUT creation or the assertion is flaky.
+
 ### Common test helpers
 
 ```swift
@@ -148,6 +137,16 @@ extension XCTestCase {
     }
 }
 ```
+
+---
+
+## Extracting a Protocol Boundary
+
+When a test would require real infrastructure (network, database, a framework singleton), do not reach for the singleton or a subclass mock:
+
+1. Define a minimal protocol with exactly the methods the SUT needs — shaped by the use case, never by the infrastructure's API surface.
+2. Inject it via the initializer.
+3. The abstraction lives next to the consumer module; the concrete infrastructure type conforms later, in its own module.
 
 ---
 
@@ -197,50 +196,34 @@ extension FeedStoreSpecs where Self: XCTestCase {
     ) {
         expect(sut, toRetrieve: .success(.none), file: file, line: line)
     }
-
-    func assertThatInsertOverridesPreviouslyInsertedCacheValues(
-        on sut: FeedStore,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        let firstFeed = uniqueImageFeed().local
-        let firstTimestamp = Date()
-        let latestFeed = uniqueImageFeed().local
-        let latestTimestamp = Date()
-
-        insert((firstFeed, firstTimestamp), to: sut)
-        insert((latestFeed, latestTimestamp), to: sut)
-
-        expect(sut, toRetrieve: .success(CachedFeed(feed: latestFeed,
-                                                     timestamp: latestTimestamp)),
-               file: file, line: line)
-    }
+    // ... one assertThat helper per spec method
 }
 ```
 
 **Concrete test class** just calls the shared assertions:
 
 ```swift
-// CoreData implements the full failable spec
-class CoreDataFeedStoreTests: XCTestCase, FailableFeedStoreSpecs {
+// CoreData's failure modes can't be triggered deterministically — base spec only
+class CoreDataFeedStoreTests: XCTestCase, FeedStoreSpecs {
     func test_retrieve_deliversEmptyOnEmptyCache() async throws {
         let sut = try makeSUT()
         assertThatRetrieveDeliversEmptyOnEmptyCache(on: sut)
     }
-    // ... each spec method delegates to shared assertion
-}
+    // ... each spec method is one line delegating to the shared assertion
 
-// InMemory implements only the base spec (no failure modes)
-class InMemoryFeedStoreTests: XCTestCase, FeedStoreSpecs {
-    func test_retrieve_deliversEmptyOnEmptyCache() async throws {
-        let sut = InMemoryFeedStore()
-        assertThatRetrieveDeliversEmptyOnEmptyCache(on: sut)
-    }
-    // ... each spec method delegates to shared assertion
+    // Return the PROTOCOL, not the concrete type — proves substitutability
+    private func makeSUT() throws -> FeedStore { ... }
 }
 ```
 
-**Benefit**: Add a new `FeedStore` implementation (e.g., `RealmFeedStore`) -> conform to `FeedStoreSpecs` -> get all contract tests for free.
+Conform to `Failable*` specs only when the implementation can deterministically simulate that failure (the since-deleted file-based store used invalid URLs/corrupt data). CoreData and InMemory conform to `FeedStoreSpecs` only.
+
+**Workflow for a new store implementation**:
+1. Prerequisite: one assertion per behavior per test — only then can specs be extracted.
+2. Start with a test class conforming to the spec protocol with EMPTY method bodies — a compiler-enforced TODO list.
+3. Fill one behavior per commit, each body one line delegating to the shared `assertThat` helper.
+
+The same pattern repeats for `FeedImageDataStoreSpecs` — both the CoreData and InMemory stores conform.
 
 ---
 
@@ -251,6 +234,19 @@ Test real infrastructure crossing module boundaries. Use actual CoreData stack, 
 ```swift
 @MainActor
 class CacheFeedIntegrationTests: XCTestCase {
+    override func setUp() async throws {
+        try await super.setUp()
+        setupEmptyStoreState()      // clean BEFORE too — guards against a crashed previous run
+    }
+
+    override func tearDown() async throws {
+        undoStoreSideEffects()
+        try await super.tearDown()
+    }
+
+    // setupEmptyStoreState() and undoStoreSideEffects() both call deleteStoreArtifacts(),
+    // which removes the file at testSpecificStoreURL()
+
     func test_load_deliversItemsSavedOnASeparateInstance() throws {
         let storeURL = testSpecificStoreURL()
         let sutToSave = try makeSUT(storeURL: storeURL)
@@ -269,12 +265,48 @@ class CacheFeedIntegrationTests: XCTestCase {
     }
 
     private func testSpecificStoreURL() -> URL {
+        // named after the test class — parallel test classes never share artifacts
         cachesDirectory().appendingPathComponent("\(type(of: self)).store")
     }
 }
 ```
 
 **Purpose**: Verify that CoreData correctly persists and retrieves data across separate loader instances. Catches serialization bugs that unit tests with spies would miss.
+
+---
+
+## Testing the HTTPClient Infrastructure (URLProtocol Stubbing)
+
+Never subclass `URLSession`, and never add mirror protocols (`HTTPSession`) whose only purpose is testability. Test the real `URLSession` path by registering a `URLProtocolStub: URLProtocol` whose `canInit` returns `true` for EVERY request — no test may hit the network.
+
+```swift
+class URLProtocolStub: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true } // intercept everything
+
+    override func startLoading() {
+        // 1. Deliver the stubbed (data, response, error) through `client`
+        // 2. Call client?.urlProtocolDidFinishLoading(self) BEFORE invoking any request
+        //    observer — otherwise URLSession's loading threads outlive the test
+        //    (a data race that is invisible without TSan)
+        // 3. Trigger request observers HERE (instance-level), never from class-level canInit
+    }
+}
+```
+
+- Register in `setUp`, unregister in `tearDown` (`URLProtocol.registerClass`/`unregisterClass`).
+- Synchronize stub state behind a serial queue — URLProtocol callbacks race the test thread.
+- Enumerate every invalid `(data, response, error)` combination in one table-driven `resultErrorFor` test; map them all to a single private `UnexpectedValuesRepresentation` error.
+- Empty body is success: the URL Loading System delivers non-nil EMPTY `Data` for valid responses (e.g. 204) — do not require `data.count > 0`.
+- The async `URLSession.data(from:)` API structurally cannot produce some invalid combinations — shrink the table when migrating rather than stubbing impossible states.
+
+---
+
+## End-to-End API Tests
+
+Real client + loader composition against a backend test account with FIXED known data, asserted index-by-index:
+
+- Separate target, excluded from the default dev scheme; run by a CI-only scheme.
+- MUST use `URLSession(configuration: .ephemeral)` — the shared session's on-disk cache serves stale responses across runs (false greens).
 
 ---
 
@@ -311,80 +343,94 @@ class FeedSnapshotTests: XCTestCase {
 
 ## 5. Acceptance Tests
 
-End-to-end tests with the full DI container. Use `HTTPClientStub` for deterministic network behavior.
+In-process end-to-end tests that exercise the real `SceneDelegate` composition. `launch` is **synchronous** (`throws`, not `async`): determinism comes from `Task.immediate` adapters + an `HTTPClientStub` whose async `get` returns without ever suspending + a `CoreDataFeedStore` on `/dev/null` with `contextQueue: .main`, so the whole first load completes *before* `launch` returns. No sleeps.
 
 ```swift
 @MainActor
 class FeedAcceptanceTests: XCTestCase {
-    func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() async throws {
-        let feed = try await launch(httpClient: .online(response), store: .empty)
+    func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() throws {
+        let store = try CoreDataFeedStore.empty
+        let feed = try launch(httpClient: .online(response), store: store)
 
         XCTAssertEqual(feed.numberOfRenderedFeedImageViews(), 2)
-        XCTAssertEqual(feed.renderedFeedImageData(at: 0), makeImageData0())
-        XCTAssertEqual(feed.renderedFeedImageData(at: 1), makeImageData1())
+
+        try store.withWaitingChanges { feed.simulateLoadMoreFeedAction() }
+
+        XCTAssertEqual(feed.numberOfRenderedFeedImageViews(), 3)
     }
 
-    func test_onLaunch_displaysCachedRemoteFeedWhenCustomerHasNoConnectivity() async throws {
-        // First launch: cache remote data
-        let onlineFeed = try await launch(httpClient: .online(response), store: .empty)
+    func test_onLaunch_displaysCachedRemoteFeedWhenCustomerHasNoConnectivity() throws {
+        let sharedStore = try CoreDataFeedStore.empty
+
+        // First launch: cache remote data (same store instance carried across "launches")
+        let onlineFeed = try launch(httpClient: .online(response), store: sharedStore)
         onlineFeed.simulateFeedImageViewVisible(at: 0)
 
         // Second launch: offline — shows cached data
-        let offlineFeed = try await launch(httpClient: .offline, store: onlineFeed.store)
-        XCTAssertEqual(offlineFeed.numberOfRenderedFeedImageViews(), 2)
+        let offlineFeed = try launch(httpClient: .offline, store: sharedStore)
+        XCTAssertEqual(offlineFeed.numberOfRenderedFeedImageViews(), 1)
     }
 
-    private func launch(httpClient: HTTPClientStub,
-                        store: InMemoryFeedStore) async throws -> ListViewController {
+    private func launch(httpClient: HTTPClientStub = .offline,
+                        store: CoreDataFeedStore) throws -> ListViewController {
         let sut = SceneDelegate(httpClient: httpClient, store: store)
-        sut.window = UIWindow(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        // UIWindow(frame:) is deprecated on iOS 26 — build a dummy scene (no public init exists)
+        let scene = try XCTUnwrap((UIWindowScene.self as NSObject.Type).init() as? UIWindowScene)
+        sut.window = UIWindow(windowScene: scene)
         sut.configureWindow()
 
         let nav = sut.window?.rootViewController as? UINavigationController
         let feed = nav?.topViewController as! ListViewController
         feed.simulateAppearance()
-        // Allow async loading
-        try await Task.sleep(nanoseconds: 100_000_000)
         return feed
     }
 }
 ```
 
 **Key techniques**:
-- `SceneDelegate` has a convenience init accepting `HTTPClient` + store for test injection
-- `HTTPClientStub.online(response)` / `.offline` provides deterministic network behavior
-- `InMemoryFeedStore` persists across "launches" to test cache behavior
-- DSL methods (`numberOfRenderedFeedImageViews`, `renderedFeedImageData`) keep assertions readable
-
-### HTTPClientStub patterns
+- `SceneDelegate.init(httpClient:store:)` is the test-injection seam — constructor injection, not launch-argument back doors.
+- `HTTPClientStub.online(response)` / `.offline` gives deterministic network behavior.
+- Test-target factory extensions on the **real** store provide the fixtures: `.empty`, `.withExpiredFeedCache`, `.withNonExpiredFeedCache` are `CoreDataFeedStore` extensions over `/dev/null`. `InMemoryFeedStore` is **not** used here — it is the production fallback (see `composition-root.md`).
 
 ```swift
-class HTTPClientStub: HTTPClient {
-    private let stub: (URL) -> Result<(Data, HTTPURLResponse), Error>
-
-    static var offline: HTTPClientStub {
-        HTTPClientStub { _ in .failure(NSError(domain: "offline", code: 0)) }
+extension CoreDataFeedStore {
+    static var empty: CoreDataFeedStore {
+        get throws {
+            try CoreDataFeedStore(storeURL: URL(fileURLWithPath: "/dev/null"), contextQueue: .main)
+        }
     }
-
-    static func online(_ stub: @escaping (URL) -> (Data, HTTPURLResponse)) -> HTTPClientStub {
-        HTTPClientStub { url in .success(stub(url)) }
-    }
-
-    func get(from url: URL) async throws -> (Data, HTTPURLResponse) {
-        try stub(url).get()
+    static var withExpiredFeedCache: CoreDataFeedStore {
+        get throws {
+            let store = try CoreDataFeedStore.empty
+            try store.insert([], timestamp: .distantPast)
+            return store
+        }
     }
 }
 ```
 
-### InMemoryFeedStore factory extensions
+### Waiting for genuinely-parallel side effects — never `Task.sleep`
+
+`launch` is synchronous, but actions like load-more use `async let` to fetch the remote page and the cache in parallel, so the resulting cache *save* lands after the action returns. Don't sleep — **poll for the observable state change**:
 
 ```swift
-extension InMemoryFeedStore {
-    static var empty: InMemoryFeedStore { InMemoryFeedStore() }
+extension CoreDataFeedStore {
+    func withWaitingChanges(_ action: () -> Void, timeout: TimeInterval = 1) throws {
+        let state = try retrieve()?.timestamp
+        action()
+        let maxDate = Date() + timeout
+        while Date() <= maxDate {
+            if try retrieve()?.timestamp != state { return }   // the save became visible
+            RunLoop.current.run(until: Date())                 // pump the run loop
+        }
+        throw Timeout()
+    }
 }
 ```
 
-The same `InMemoryFeedStore` instance is passed between simulated "launches" to verify cache persistence across app lifecycle events.
+> Guardrail: never use `Task.sleep` to wait for loading in acceptance tests — `Task.immediate` + a main-context store makes launch synchronous; for genuinely-parallel side effects, poll for the state change with a timeout.
+
+**Avoid XCUITest acceptance tests with launch-argument/`#if DEBUG` back doors.** The case study built exactly that — a `DebuggingSceneDelegate` subclass, a `-reset` argument, a `connectivity` UserDefault — and then deleted the entire UI-test target in favor of these in-process tests. Constructor injection at the composition root replaces every test hook, and no test code ships in the production `SceneDelegate`.
 
 ---
 
@@ -477,6 +523,12 @@ enum AsyncResult {
 - `result(at:timeout:)` — asserts the outcome with a timeout guard
 - `cancelPendingRequests()` — cleans up in-flight streams
 
+`makeSUT` wires the cleanup so streams can't leak across tests, and cancellation tests must `await` the `.cancelled` result before asserting cancelled URLs (async cancellation isn't synchronous like Combine's `receiveCancel`):
+
+```swift
+addTeardownBlock { [weak loader] in try await loader?.cancelPendingRequests() }
+```
+
 ### Usage in UI integration tests
 
 ```swift
@@ -492,6 +544,50 @@ func test_loadFeedCompletion_rendersSuccessfullyLoadedFeed() async {
     await loader.complete(with: Paginated(items: [image0, image1]), at: 0)
 
     XCTAssertEqual(sut.numberOfRenderedFeedImageViews(), 2)
+}
+```
+
+---
+
+## Cross-Cutting Patterns
+
+### Domain-named test DSL for business rules
+
+Hide business-rule constants behind domain-named helpers so tests assert *semantics*, not the current value. If the cache max-age changes from 7 days, only the helper changes:
+
+```swift
+extension Date {
+    func minusFeedCacheMaxAge() -> Date { adding(days: -feedCacheMaxAgeInDays) }
+}
+```
+
+Sample the boundary: test at expiration, and ±1 second around it (`minusFeedCacheMaxAge().adding(seconds: 1)` and `.adding(seconds: -1)`).
+
+### Test mappers in isolation
+
+Once loaders become composed `() async throws -> Resource` closures, the mapping logic is a static function — test it directly, with no `HTTPClient` double:
+
+```swift
+let result = try ImageCommentsMapper.map(json, from: HTTPURLResponse(statusCode: 200))
+```
+
+Assert thrown errors and mapped values per status code and payload. These replaced spy-based use-case tests when the loader protocols were deleted.
+
+### Localization guard test
+
+Iterate every supported localization and assert no key is missing a translation:
+
+```swift
+func test_localizedStrings_haveKeysAndValuesForAllSupportedLocalizations() {
+    let bundle = Bundle(for: FeedPresenter.self)
+    let table = "Feed"
+    for localization in bundle.localizations {
+        let localizedBundle = Bundle(path: bundle.path(forResource: localization, ofType: "lproj")!)!
+        for key in keys(in: localizedBundle, table) {
+            let value = localizedBundle.localizedString(forKey: key, value: nil, table: table)
+            XCTAssertNotEqual(value, key, "Missing \(localization) translation for '\(key)'")
+        }
+    }
 }
 ```
 

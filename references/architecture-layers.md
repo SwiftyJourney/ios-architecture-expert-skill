@@ -58,16 +58,9 @@ public protocol FeedImageDataStore {
 
 **Rules**: Models own no behavior. Protocols define single-responsibility boundaries. Each protocol maps to one use case.
 
-```swift
-// Correct: value type + Sendable + Hashable
-public struct FeedImage: Hashable, Sendable {  // ...
-}
-
-// Incorrect: class, mutable, not Sendable
-public class FeedImage {  // BAD — reference type, not thread-safe
-    var id: UUID           // BAD — mutable
-}
-```
+**Guardrails**:
+- Do not make use-case protocols generic over their error type (`associatedtype Error`) — the constraint infects every consumer. The case study tried it and reverted within minutes; use a plain `Error` (or a locally-scoped typed `throws`).
+- Do not add a production conformance (e.g. `Equatable` on a result/boundary enum) solely to satisfy a test assertion — pattern-match in an `expect(_:toCompleteWith:)` helper instead.
 
 ---
 
@@ -139,6 +132,10 @@ public protocol HTTPClient {
 
 **Rules**: Mappers are `final class` with `static` methods — no instances. Decodable types are `private`. Errors are typed enums. `HTTPClient` is a protocol, not `URLSession` directly.
 
+- **Status-code contracts are per endpoint.** The feed mapper accepts exactly `200`; the image-comments mapper accepts any `2xx` (`(200...299).contains(...)`). Assert the exact accepted range per mapper — do not share one `isOK`.
+- **Pagination is keyset-based**, not offset: `after_id=<last item's id>`. Keying on the last item's identity stays stable when the feed mutates between requests, unlike an offset.
+- **Do not define single-method loader protocols** (`FeedLoader`). The Composition Root composes `HTTPClient` + a static mapper into a plain `() async throws -> Resource` closure — the closure *is* the abstraction; the protocol just adds a name.
+
 ---
 
 ## Cache Layer (Foundation only)
@@ -192,7 +189,26 @@ extension LocalFeedLoader {
         return []
     }
 }
+
+// CQS: `load` is a side-effect-free QUERY. Deleting an invalid/expired cache is a
+// separate COMMAND — `validateCache` — run from `sceneWillResignActive`, never inside load.
+extension LocalFeedLoader {
+    private struct InvalidCache: Error {}
+
+    public func validateCache() throws {
+        do {
+            if let cache = try store.retrieve(),
+               !FeedCachePolicy.validate(cache.timestamp, against: currentDate()) {
+                throw InvalidCache()
+            }
+        } catch {
+            try store.deleteCachedFeed()    // delete on expiration OR retrieval error
+        }
+    }
+}
 ```
+
+> The case study first shipped deletion *inside* `load`, then reverted it when Load and Validate were split into separate use cases. A query that mutates state is the smell; the fix was a requirements change first, code second.
 
 ```swift
 // Cache policy — encapsulated business rule, no instance state
@@ -211,7 +227,9 @@ final class FeedCachePolicy {
 }
 ```
 
-**Rules**: `LocalFeedLoader` converts between `FeedImage` <-> `LocalFeedImage` at the boundary. `currentDate` is injected as a closure for test control. Cache policy is a separate type — not embedded in the loader. Store protocol uses `throws` (not callbacks).
+**Rules**: `LocalFeedLoader` converts between `FeedImage` <-> `LocalFeedImage` at the boundary (private `toLocal()`/`toModels()` `Array` extensions). `currentDate` is injected as a closure for test control. Cache policy is a separate type — not embedded in the loader. Store protocol uses `throws` (not callbacks).
+
+> **Guardrail**: do not add `Codable`/`@Model`/persistence conformances to `LocalFeedImage` — that is a framework-specific detail. Wrap it in a private type inside the store (`ManagedFeedImage`, `CodableFeedImage`) and convert at the boundary, mirroring the API layer's private-`Decodable` rule.
 
 ---
 
@@ -310,27 +328,24 @@ public final class LoadResourcePresenter<Resource, View: ResourceView> {
 }
 ```
 
-**Rules**: Presenter has no UIKit/SwiftUI imports. Error strings use `NSLocalizedString` with `Bundle(for: Self.self)`. The `Mapper` typealias allows resource transformation (e.g., `Data -> UIImage`). Identity mapper convenience init eliminates boilerplate when types match.
+**Rules**: Presenter has no UIKit/SwiftUI imports. The `Mapper` typealias allows resource transformation (e.g., `Data -> UIImage`). Identity mapper convenience init eliminates boilerplate when types match.
+
+- **Bundle**: error strings use `NSLocalizedString` with `Bundle(for: Self.self)` in **framework** targets, `Bundle.module` in **SPM** targets.
+- **Presenters create ALL presentation data**, including the screen `title` (a presenter property using `NSLocalizedString`); composers assign it to the view — the view controller stays agnostic of presenters.
+- **Locale/time-dependent view models** inject their context as *defaulted* parameters of the static `map`, so production call-sites stay clean and tests pin a fixed locale:
+
+```swift
+public static func map(_ comments: [ImageComment],
+                       currentDate: Date = Date(),
+                       calendar: Calendar = .current,
+                       locale: Locale = .current) -> ImageCommentsViewModel { ... }
+```
 
 ---
 
 ## UI Layer — UIKit
 
-`ListViewController` uses `DiffableDataSource`. `CellController` type-erases cell behavior. Views conform to presenter protocols.
-
-```swift
-// CellController — type-erased cell composition
-public struct CellController {
-    let id: any Hashable & Sendable
-    let dataSource: UITableViewDataSource
-    let delegate: UITableViewDelegate?
-    let dataSourcePrefetching: UITableViewDataSourcePrefetching?
-
-    public init(id: any Hashable & Sendable, _ dataSource: UITableViewDataSource) { ... }
-}
-
-extension CellController: Equatable, Hashable { /* hash/compare by id */ }
-```
+`ListViewController` uses `DiffableDataSource`. `CellController` (a struct wrapping any `UITableViewDataSource`, with optional delegate/prefetching discovered via `as?`) type-erases cell behavior — full definition and the "why a struct, not a protocol" rationale live in `adapters-and-proxies.md`. Views conform to presenter protocols.
 
 ```swift
 // ListViewController — DiffableDataSource + refresh + error view
@@ -346,60 +361,32 @@ public final class ListViewController: UITableViewController,
             snapshot.appendSections([section])
             snapshot.appendItems(cellControllers, toSection: section)
         }
+        // Guard avoids redundant reloads; applySnapshotUsingReloadData (not animated apply)
+        // sidesteps diffable's reconfigure/animation pitfalls with custom cells.
         if snapshot.itemIdentifiers != dataSource.snapshot().itemIdentifiers {
             dataSource.applySnapshotUsingReloadData(snapshot)
+        }
+    }
+
+    // Diffable only reloads CHANGED items, so it won't reflow on a Dynamic Type change —
+    // reload when the content size category changes.
+    public override func traitCollectionDidChange(_ previous: UITraitCollection?) {
+        if previous?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
+            tableView.reloadData()
         }
     }
 }
 ```
 
-**Rules**: View controllers are thin — display logic only. `CellController` wraps any cell type through protocol composition. `onRefresh` closure decouples from specific loading logic. Multiple sections supported via variadic parameter.
+**Rules**: View controllers are thin — display logic only. `onRefresh` closure decouples from specific loading logic. Multiple sections supported via variadic parameter.
 
 ---
 
 ## UI Layer — SwiftUI Equivalent
 
-Same architectural boundaries, different binding mechanism:
+Same architectural boundaries, different binding mechanism. An `@Observable` view model replaces the adapter → `WeakRefVirtualProxy` → presenter chain: SwiftUI manages view lifecycle, so the proxy is unnecessary. The Composition Root still creates the view model (injecting the `() async throws -> Resource` loader) and passes it via `@State`/`.environment()`. The presenter's static mappers and localized strings are reused as-is from the Presentation layer.
 
-```swift
-// @Observable view model replaces WeakRefVirtualProxy + delegate pattern
-@Observable
-final class FeedViewModel {
-    private(set) var items: [FeedImageViewModel] = []
-    private(set) var isLoading = false
-    private(set) var errorMessage: String?
-
-    private let loader: () async throws -> Paginated<FeedImage>
-
-    func load() async {
-        isLoading = true
-        errorMessage = nil
-        do {
-            let page = try await loader()
-            items = page.items.map(FeedImagePresenter.map)
-            isLoading = false
-        } catch {
-            errorMessage = LoadResourcePresenter<Any, AnyResourceView>.loadError
-            isLoading = false
-        }
-    }
-}
-
-// SwiftUI View — thin, displays view model state
-struct FeedView: View {
-    @State var viewModel: FeedViewModel
-
-    var body: some View {
-        List(viewModel.items) { item in
-            FeedImageRow(viewModel: item)
-        }
-        .refreshable { await viewModel.load() }
-        .overlay { if viewModel.isLoading { ProgressView() } }
-    }
-}
-```
-
-**Rules**: `@Observable` replaces the `WeakRefVirtualProxy` pattern — SwiftUI manages view lifecycle. Composition Root creates the `@Observable` view model and passes it via `@State` or `.environment()`. Presenter logic (mapping, error strings) is still reused from the shared Presentation layer.
+For SwiftUI specifics (state management, view composition, `@Observable` patterns), use the `swiftui-expert` skill.
 
 ---
 

@@ -25,28 +25,21 @@ Jump to:
 
 ---
 
+## Step 0 (optional): Prototype the UI
+
+Build a UI prototype with static data first to validate UX with zero architecture investment, then throw the logic away. The core module compiling for **both macOS and iOS** is the cheapest enforcement of zero UIKit imports in the domain/API/cache/presentation layers — a second platform fails to build the moment one leaks.
+
+## TDD rhythm (applies to every step below)
+
+- New types are born *inside the test file* and stay there while their behavior is unstable. The spy's `receivedMessages` enum is the draft of the eventual protocol.
+- The first test asserts the SUT does nothing on init (no side effects on creation).
+- One observable behavior per commit; refactor only on green.
+- Move the type to the production target (adding `public`/`final`) as its own refactor step, once the collaborator boundary has stabilized.
+- Add protocol conformances in separate commits, when composition actually needs them.
+
 ## Step 1: Define BDD Specs
 
-Write a narrative and acceptance criteria before any code.
-
-```
-Narrative:
-  As a customer
-  I want to see a feed of images
-  So I can browse interesting content
-
-Scenario: Customer has connectivity
-  Given the customer has connectivity
-  When the customer requests to see the feed
-  Then the app should display the latest feed from remote
-  And replace the cache with the new feed
-
-Scenario: Customer has no connectivity
-  Given the customer has no connectivity
-  And there is a cached version of the feed
-  When the customer requests to see the feed
-  Then the app should display the cached feed
-```
+Write a narrative and acceptance criteria before any code — use the `requirements-engineering` skill to turn the feature idea into a narrative plus Given/When/Then scenarios. Each scenario becomes one acceptance test in Step 9.
 
 ---
 
@@ -251,8 +244,9 @@ Checklist:
 ## Step 9: Write Acceptance Tests
 
 ```swift
-func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() async throws {
-    let feed = try await launch(httpClient: .online(response), store: .empty)
+func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() throws {
+    let store = try CoreDataFeedStore.empty
+    let feed = try launch(httpClient: .online(response), store: store)
     XCTAssertEqual(feed.numberOfRenderedFeedImageViews(), 2)
 }
 ```
@@ -260,9 +254,9 @@ func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() async throws 
 Checklist:
 - [ ] Test each BDD scenario from Step 1
 - [ ] Use `HTTPClientStub.online/.offline` for deterministic network
-- [ ] Use `InMemoryFeedStore` for cross-launch cache persistence
+- [ ] `launch` is **synchronous** — pass the real `CoreDataFeedStore.empty` (`/dev/null`, `.main` context); carry one store instance across simulated launches for cache persistence (see `testing-strategy.md` §5)
 - [ ] Inject via `SceneDelegate` convenience init
-- [ ] DSL helper methods for readable assertions
+- [ ] DSL helper methods for readable assertions; `withWaitingChanges` (not `Task.sleep`) for parallel side effects
 
 ---
 
@@ -301,12 +295,28 @@ Checklist:
 
 ---
 
+## Second feature: duplicate, then generalize
+
+Generic abstractions (`LoadResourcePresenter`, `LoadResourcePresentationAdapter`, `RemoteLoader`) are never built speculatively for one client. The case study's rhythm, triggered by the *second* feature (comments) resembling the first (feed):
+
+1. Duplicate the concrete component and make its tests pass.
+2. Strip the feature-specific parts from the copy (e.g. the `title`).
+3. Introduce the variation point with concrete placeholder types (a `Mapper` closure).
+4. Make it generic (`<Resource, View: ResourceView>`).
+5. Swap each feature to the generic type, one commit each.
+6. Delete the now-unused concrete logic.
+
+Never create generics for a single client — duplication across two features is the signal, and two green implementations side by side prove the abstraction's shape.
+
+> Migrating an *existing* protocol boundary (sync→async, completion→`throws`)? See the migration playbook in `concurrency-at-boundaries.md` — same incremental, tests-green-throughout discipline.
+
 ## Guardrails
 
 - Do not skip BDD specs — they drive the acceptance tests in Step 9
 - Do not jump to UI before domain and presentation are tested
 - Do not wire dependencies outside the Composition Root
 - Do not add concurrency annotations retroactively — Step 3 ensures they are baked in from the start
+- Do not generalize with a single client — duplicate first; extract generics only once two features share the behavior
 
 ## Verification
 

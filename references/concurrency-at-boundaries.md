@@ -20,65 +20,28 @@ Jump to:
 - [async let for Parallel Loading](#async-let-for-parallel-loading)
 - [Cancellation Handling in Adapters](#cancellation-handling-in-adapters)
 - [Swift 6 Strict Concurrency — Architectural Impact](#swift-6-strict-concurrency--architectural-impact)
+- [Migration Playbook: Closures/Combine → async/await](#migration-playbook-closurescombine--asyncawait)
+- [Swift 6 / UIKit Interop Gotchas](#swift-6--uikit-interop-gotchas)
 
 ---
 
 ## Scheduler Protocol — Abstract Execution Context
 
-The Scheduler protocol abstracts whether store operations run on CoreData's background context or InMemory's main actor. The Composition Root decides the execution context — not the feature module.
+The Scheduler protocol abstracts whether store operations run on CoreData's background context or InMemory's main actor. Full code: `composition-root.md` (its canonical home — the protocol is a wiring concern, so it lives in the Composition Root, not the feature module).
 
-```swift
-protocol Scheduler {
-    @MainActor
-    func schedule<T>(_ action: @escaping @Sendable () throws -> T) async rethrows -> T
-}
-```
-
-**Why this abstraction exists**: `FeedService` calls `store.schedule { ... }` without knowing whether the store is CoreData or InMemory. This is architectural polymorphism — the same code path works for both production and test environments.
-
-### CoreData conformance
-
-```swift
-extension CoreDataFeedStore: Scheduler {
-    @MainActor
-    func schedule<T>(_ action: @escaping @Sendable () throws -> T) async rethrows -> T {
-        if contextQueue == .main {
-            return try action()
-        } else {
-            return try await perform(action)
-        }
-    }
-}
-```
-
-When the context is on the main queue, the action runs synchronously (no async hop). When on a background queue, it dispatches through `NSManagedObjectContext.perform`.
-
-### InMemory conformance
-
-```swift
-extension InMemoryFeedStore: Scheduler {
-    @MainActor
-    func schedule<T>(_ action: @escaping @Sendable () throws -> T) async rethrows -> T {
-        try action()
-    }
-}
-```
-
-Always synchronous — `InMemoryFeedStore` is `@MainActor` and all data lives in memory.
+Concurrency rationale:
+- The CoreData conformance short-circuits **synchronously** when `contextQueue == .main` — no async hop, so acceptance tests injecting the real store with `contextQueue: .main` run deterministically. Background contexts dispatch through `NSManagedObjectContext.perform`.
+- The InMemory conformance is always synchronous — the store is `@MainActor` with in-memory state.
+- Store side effects that follow a network result are wrapped in `store.schedule { }` not only for thread safety but to get OFF the HTTP client's callback context — doing cache writes where the response arrives delays delivery of other in-flight responses.
 
 ---
 
 ## `@Sendable` Closures at Composition Boundaries
 
-The `@Sendable` annotation is required at composition boundaries where closures cross actor isolation domains. The most important example is the `loadMore` closure in pagination:
+The `@Sendable` annotation is required at composition boundaries where closures cross actor isolation domains. The most important example is the `loadMore` closure in pagination (full `makePage` code: `composition-root.md`):
 
 ```swift
-// In FeedService.makePage
-private func makePage(items: [FeedImage], last: FeedImage?) -> Paginated<FeedImage> {
-    Paginated(items: items, loadMore: last.map { last in
-        { @MainActor @Sendable in try await self.loadMoreRemoteFeed(last: last) }
-    })
-}
+{ @MainActor @Sendable in try await self.loadMoreRemoteFeed(last: last) }
 ```
 
 **Why both annotations**:
@@ -117,27 +80,14 @@ Capture `[store]` — not `[self]`. The `FeedService` is `@MainActor` and cannot
 
 ### Why it matters
 
-In `LoadResourcePresentationAdapter.loadResource()`, the presenter must receive `didStartLoading()` **synchronously** before any async work begins. This ensures the loading indicator appears immediately.
+In `LoadResourcePresentationAdapter.loadResource()`, the presenter must receive `didStartLoading()` **synchronously** before any async work begins. This ensures the loading indicator appears immediately. Concurrency-relevant lines only (full adapter: `adapters-and-proxies.md`):
 
 ```swift
-// Correct: Task.immediate — didStartLoading() runs synchronously
-func loadResource() {
-    guard !isLoading else { return }
-    presenter?.didStartLoading()
-    isLoading = true
-
-    cancellable = Task.immediate { @MainActor [weak self] in
-        defer { self?.isLoading = false }
-        do {
-            if let resource = try await self?.loader() {
-                if Task.isCancelled { return }
-                self?.presenter?.didFinishLoading(with: resource)
-            }
-        } catch {
-            if Task.isCancelled { return }
-            self?.presenter?.didFinishLoading(with: error)
-        }
-    }
+presenter?.didStartLoading()                              // synchronous — before the Task
+cancellable = Task.immediate { @MainActor [weak self] in
+    // ...
+    if Task.isCancelled { return }                        // after every await
+    self?.presenter?.didFinishLoading(with: resource)
 }
 ```
 
@@ -148,6 +98,8 @@ cancellable = Task { @MainActor [weak self] in  // BAD
     // ...
 }
 ```
+
+**Availability**: `Task.immediate` requires a Swift 6.2-era toolchain and recent deployment targets (the case study's deployment target is iOS 26). On older targets use plain `Task` and preserve the synchronous-`didStartLoading` guarantee another way (e.g. call `didStartLoading()` before creating the Task, as above).
 
 ### Fire-and-forget with `Task.immediate`
 
@@ -258,6 +210,8 @@ Enable strict concurrency across all targets:
 | Composition Root (`FeedService`, Composers) | **Yes** | All wiring on main thread |
 | `InMemoryFeedStore` | **Yes** | Mutable state accessed from composition |
 
+Annotate PUBLIC view protocols `@MainActor` explicitly even when the target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — the build setting is per-target and invisible to framework clients; the annotation makes isolation part of the API contract.
+
 ### Where `Sendable` goes
 
 | Type | `Sendable`? | Mechanism |
@@ -268,6 +222,39 @@ Enable strict concurrency across all targets:
 | `CoreDataFeedStore` | Yes | Explicit `Sendable` conformance, `let` properties |
 | `InMemoryFeedStore` | No | `@MainActor` provides isolation instead |
 | `ResourceLoadingViewModel` | Implicit | `struct` with `Bool` property |
+
+---
+
+## Migration Playbook: Closures/Combine → async/await
+
+Order matters — from the case study's migration history:
+
+1. **Strictness first, APIs later.** Enable `SWIFT_STRICT_CONCURRENCY = complete` per target, inside-out (core framework → UI framework → app), and fix ALL warnings BEFORE changing any API. This forces `Sendable`/`@MainActor` onto existing code, so later API changes are purely structural.
+2. **Leaf infrastructure protocols first.** Migrate `HTTPClient`, then the store — both have native async APIs to land on.
+3. **Composition per feature, in two beats.** Beat 1: add the async functions in the Composition Root but keep the old adapter alive behind a bridge (historically `Deferred { Future { Task { … } } }`) — tests stay green. Beat 2: flip the adapter signature to `() async throws -> T` and delete the bridge.
+4. **Flip the language mode last.** Delete the helpers, set `SWIFT_VERSION = 6.0`, and THEN annotate public view protocols `@MainActor` explicitly.
+
+### Deprecation bridge for a protocol boundary (5 steps)
+
+1. Add the async requirement PLUS a protocol-extension default implementation bridging to the old closure API via `withCheckedThrowingContinuation` wrapped in `withTaskCancellationHandler` (cancel the old task handle on Task cancellation). Mark the old requirement `@available(*, deprecated)`.
+2. Migrate tests to the async API.
+3. Migrate callers.
+4. Implement the native async method in the infra type (`URLSession.data(from:)`, `context.perform`) — the default implementation is now dead code.
+5. Delete the deprecated requirement and the bridge.
+
+`nonisolated(unsafe)` may appear ONLY inside this temporary bridge — it must be gone by step 5.
+
+**Naming during coexistence**: prefix the NEW type (`AsyncLoadResourcePresentationAdapter`); give it the canonical name when the old one is deleted. Never rename the old one.
+
+---
+
+## Swift 6 / UIKit Interop Gotchas
+
+- `CALayer`/`CAGradientLayer` subclasses under `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` need `nonisolated override init()`, `nonisolated override init(layer:)`, `nonisolated required init?(coder:)` — otherwise the inits become MainActor-isolated and no longer override.
+- KVO/notification callbacks are nonisolated; when they are known to arrive on main (e.g. `contentOffset` observation), wrap the body in `MainActor.assumeIsolated`.
+- Migrating to async `URLSession.data(from:)` SHRINKS the error surface — some invalid `(data, response, error)` combinations become structurally impossible; delete those contract tests instead of stubbing impossible states.
+- Under `@MainActor` isolation, "dispatches to main thread" tests become inexpressible — delete them; the type system now proves the property.
+- `Thread.isMainThread` does not mean "on the main queue" (the main thread can run other queues); prefer `@MainActor` isolation over GCD-level checks.
 
 ---
 
@@ -286,6 +273,7 @@ Enable strict concurrency across all targets:
 - [ ] All presenters, adapters, and composition code are `@MainActor`
 - [ ] No domain types or store protocols have `@MainActor`
 - [ ] All `@Sendable` closures capture only `Sendable` values
-- [ ] Run Thread Sanitizer (`-enableThreadSanitizer YES`) — zero data races
+- [ ] Run Thread Sanitizer in CI (xcodebuild flag `-enableThreadSanitizer YES`) — zero data races
+- [ ] Run with `-com.apple.CoreData.ConcurrencyDebug 1` in test schemes — zero context-queue violations
 - [ ] `Task.immediate` used where synchronous-first execution is needed
 - [ ] `Task.isCancelled` checked after every `await` in adapter code

@@ -1,0 +1,44 @@
+{
+  "skill_name": "ios-architecture-expert",
+  "evals": [
+    {
+      "id": "greenfield-bookmarks-feature",
+      "prompt": "I'm starting a new feature in my iOS app: 'Bookmarks'. Users see a list of bookmarked articles (title, author, thumbnail image) loaded from our REST API (GET /v1/bookmarks), with offline support so the last loaded list shows when there's no connection. We use Swift 6 and SPM. Design and write the Swift code for this feature end to end -- models, networking, caching, presentation, a UIKit list screen, and the code that wires it all together at app launch. Write the source files to the output directory, organized into folders the way you'd organize the modules.",
+      "expected_output": "A multi-module feature design: a framework-free Bookmarks core (domain model as Sendable struct, use-case protocols, API mapper behind an HTTPClient protocol, store protocol + cache policy, presenter producing plain view-model structs), a separate UIKit layer, and a Composition Root (composer/static factory in the app target) where ALL concrete instantiation and wiring happens. Concurrency annotations confined to boundaries: @MainActor on presentation/UI/composition only, Sendable models, no @unchecked Sendable.",
+      "assertions": [
+        "The domain model (Bookmark or equivalent) is a struct declared Sendable (and Hashable or Equatable), not a class",
+        "No file in the domain/API/cache/presentation code contains 'import UIKit' or 'import SwiftUI' -- only the dedicated UI layer files and the composition root may import a UI framework",
+        "Networking is abstracted behind an HTTPClient (or equivalent) protocol and persistence behind a store protocol; URLSession/CoreData/FileManager concrete types are referenced only in conformances and in the composition root, never inside use cases or presenters",
+        "There is exactly one composition site (a composer/static factory or service in the app target) that instantiates every concrete dependency; no feature, presentation, or UI type constructs its own loader, client, store, or presenter internally (constructor injection throughout)",
+        "The presentation layer outputs plain view-model structs and passes images across the boundary as Data (or a URL), with no UIImage/UIColor/SwiftUI types in presenter or view-model code",
+        "@MainActor appears only on presentation/adapters/UI/composition types; the domain model and the store/HTTPClient protocols carry no @MainActor, and @unchecked Sendable appears nowhere"
+      ]
+    },
+    {
+      "id": "refactor-unchecked-sendable-quickfix",
+      "prompt": "Migrating to Swift 6 strict concurrency and this file lights up with warnings. Can you make it concurrency-safe? Quick fix preferred, we ship Friday. Refactor it and write the resulting file(s) to the output directory.\n\n```swift\nimport UIKit\n\nfinal class FavoritesViewModel: ObservableObject, @unchecked Sendable {\n    static let shared = FavoritesViewModel()\n\n    @Published var favorites: [FavoriteCellModel] = []\n    @Published var isLoading = false\n\n    private var lastFetch: Date?\n\n    func load() {\n        if let lastFetch, Date().timeIntervalSince(lastFetch) < 300 { return }\n        isLoading = true\n        APIClient.shared.get(\"/v1/favorites\") { [weak self] data in\n            DispatchQueue.main.async {\n                guard let self, let data else { return }\n                let items = try? JSONDecoder().decode([FavoriteDTO].self, from: data)\n                self.favorites = (items ?? []).map {\n                    FavoriteCellModel(title: $0.title, image: UIImage(data: $0.imageData) ?? UIImage())\n                }\n                self.lastFetch = Date()\n                self.isLoading = false\n            }\n        }\n    }\n}\n\nfinal class FavoritesViewController: UITableViewController {\n    let viewModel = FavoritesViewModel.shared\n\n    func didSelect(_ item: FavoriteCellModel) {\n        navigationController?.pushViewController(FavoriteDetailViewController(item: item), animated: true)\n    }\n}\n```",
+      "expected_output": "A refactor that resists the 'quick fix' bait: @unchecked Sendable removed in favor of @MainActor isolation and Sendable value types; the singleton dismantled with the API client injected behind a protocol and instantiated in the composition root; the 5-minute freshness rule extracted into a standalone cache-policy type; UIKit removed from the view-model/presentation type (UIImage replaced by Data mapped at the UI layer); navigation moved out of the view controller into a selection closure wired by the composer; async/await replacing the completion-handler + DispatchQueue dance.",
+      "assertions": [
+        "@unchecked Sendable is removed and replaced by actor isolation (@MainActor on the view model/presentation type) and/or Sendable value types -- it is not retained or merely silenced with @preconcurrency/nonisolated(unsafe), despite the prompt asking for a quick fix",
+        "Both singletons are gone from the call path: APIClient.shared and FavoritesViewModel.shared are no longer accessed by the refactored types; the client is injected via an init-injected protocol and a composition-root/composer function is shown creating and wiring the instances",
+        "The refactored view-model/presentation type has no 'import UIKit' and no UIImage; image bytes cross the boundary as Data (or URL) and conversion to UIImage happens only in view/cell code",
+        "The 5-minute freshness rule is extracted into a separate policy type (e.g., a FavoritesCachePolicy with a pure validate function) rather than living as inline Date math in the loader or view model",
+        "Navigation no longer happens inside the view controller via pushViewController on a hardcoded destination; selection is exposed as a closure/callback parameter that the composition root wires to navigation",
+        "The completion handler + DispatchQueue.main.async pattern is replaced with async/await, with the @Sendable/@MainActor annotations placed at the boundary rather than scattered through domain logic"
+      ]
+    },
+    {
+      "id": "cache-use-case-tests",
+      "prompt": "hey, I need tests for a save/cache use case before I write it (TDD-ish). The plan: a LocalGalleryLoader that takes a GalleryStore dependency and a way to get the current date. save(_ items: [GalleryItem]) async throws should first delete the old cache, and only if deletion succeeds, insert the new items with the current timestamp. If deletion fails it should rethrow and never insert. Can you write the test suite (and whatever minimal production code/protocols the tests need to compile)? Put the files in the output directory.",
+      "expected_output": "A Swift Testing suite named after the behavior (CacheGalleryUseCaseTests or similar), driving the design with a hand-rolled GalleryStoreSpy that records messages in an enum array to assert order (.deleteCachedGallery then .insert(items, timestamp)), a makeSUT() factory used by every test, the current date injected as a closure with a fixed Date in tests, and zero real infrastructure.",
+      "assertions": [
+        "The test double is a hand-rolled spy that records received messages in order in an array of an enum (cases like deleteCachedGallery and insert(items, timestamp)); no mocking framework and no assertion-inside-the-double mock style",
+        "Tests assert message ORDER and payload through the spy's recorded messages (e.g., #expect(store.receivedMessages == [.deleteCachedGallery, .insert(items, timestamp)])), not just boolean 'wasCalled' flags",
+        "Every test obtains the SUT through a makeSUT() factory helper that returns the sut and the spy, with no test constructing LocalGalleryLoader inline",
+        "The suite is named after the use case behavior (contains 'CacheGalleryUseCase' or equivalent behavior-based name), not after the production class (not 'LocalGalleryLoaderTests')",
+        "Uses Swift Testing (@Test, #expect, @Suite or struct-based suite), not XCTest's XCTestCase/XCTAssert",
+        "currentDate is injected as a () -> Date closure fixed to a constant in tests, and a test verifies the insert received exactly that injected timestamp; there is a test that deletion error prevents insert (receivedMessages == [.deleteCachedGallery] and the error is rethrown); no CoreData/FileManager/URLSession appears anywhere in the tests"
+      ]
+    }
+  ]
+}

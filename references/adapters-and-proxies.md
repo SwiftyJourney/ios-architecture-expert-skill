@@ -79,6 +79,7 @@ extension LoadResourcePresentationAdapter: FeedImageCellControllerDelegate {
 - `Task.isCancelled` checks after every `await` prevent stale results from reaching the presenter
 - `deinit` cancels in-flight tasks when the adapter is deallocated
 - `didCancelImageRequest()` provides explicit cancellation for prefetching
+- `presenter` is deliberately a `var` (property injection) — the adapter→presenter→view→adapter cycle can only be closed after construction, in the Composition Root. Everywhere else prefer constructor injection.
 
 ---
 
@@ -113,6 +114,8 @@ extension WeakRefVirtualProxy: ResourceView where T: ResourceView, T.ResourceVie
     }
 }
 ```
+
+**Why it exists**: removing `weak var` from the presenter removes the `AnyObject` constraint from view protocols and moves lifetime policy to the Composition Root — the presenter cannot leak, and cannot even know views are held weakly.
 
 **SwiftUI note**: `WeakRefVirtualProxy` is **not needed** with `@Observable`. SwiftUI manages the view lifecycle — when a view disappears, its `@Observable` view model is released automatically. The proxy pattern is UIKit-specific.
 
@@ -184,6 +187,8 @@ final class FeedViewAdapter: ResourceView {
 
 **Key insight**: The `loadMore` adapter's `resourceView` is a **new `FeedViewAdapter`** that carries forward the `currentFeed` dictionary. This enables cell reuse across pagination loads while recursively composing the next `loadMore`.
 
+After a load-more error, retry-on-scroll is implemented by KVO-observing `tableView.contentOffset` while the load-more cell is displayed (installed in `willDisplay`, torn down in `didEndDisplaying`), guarded by `tableView.isDragging` to avoid programmatic-scroll retry loops.
+
 ---
 
 ## `Paginated<Item>`
@@ -242,6 +247,17 @@ extension CellController: Equatable, Hashable {
 
 `CellController` enables `ListViewController` to manage any cell type through a uniform interface. The `id` property (typically the domain model itself, since it is `Hashable`) enables `DiffableDataSource` diffing.
 
+**Why a struct, not a protocol**: a custom protocol couples feature modules to the shared UI module; a UIKit protocol-composition typealias forces clients to implement prefetch/delegate methods they don't need. The struct wraps any `UITableViewDataSource` and discovers optional capabilities via `as?` — Interface Segregation via composition.
+
+### Cell lifecycle contract
+
+Battle-tested against multiple iOS-version regressions:
+
+- `cellForRowAt` must reset **all** mutable cell state (shimmer, retry-button visibility), not just the image — prefetch can race display.
+- iOS 15+ may reuse a cached cell **without** calling `cellForRow` — implement `willDisplay` to recapture the cell reference and reload.
+- Cells can be recycled without ever displaying, so `didEndDisplaying` may never fire — `prepareForReuse` must invoke an `onReuse` closure that releases the controller's cell reference, and the controller must nil that closure when it releases the cell (else the previous controller's reuse fires against the new controller's cell).
+- Cancel requests via the loading-controllers registry (`[IndexPath: CellController]` populated in `cellForRowAt`), never by indexing the new model — `didEndDisplaying` fires for OLD cells after a data-source update (see SKILL.md gotcha).
+
 ---
 
 ## Full Wiring Chain
@@ -283,6 +299,7 @@ UITableView renders cells
 - Do not create adapters outside the Composition Root — they are wiring code, not business logic
 - Do not hold strong references from presenter to view — always use `WeakRefVirtualProxy` (UIKit)
 - Do not reuse `CellController` instances across different `FeedViewAdapter` lifetimes — let the `currentFeed` dictionary manage reuse within one page load cycle
+- Closures stored on cells (`onRetry`, `selection`) must capture controllers weakly — a strong closure keeps the whole adapter→presenter chain alive across cell reuse
 
 ## Verification
 
@@ -290,5 +307,5 @@ UITableView renders cells
 - [ ] Every `WeakRefVirtualProxy` wraps a view that could outlive the presenter
 - [ ] `FeedViewAdapter` creates a new adapter instance for `loadMore` with forwarded `currentFeed`
 - [ ] `Paginated.loadMore` is `nil` for the last page (when `last` item is `nil`)
-- [ ] `CellController.id` uses the domain model (not an arbitrary UUID) for correct diffing
+- [ ] `CellController.id` uses the domain model for ITEM cells (correct diffing/reuse); auxiliary cells with no domain identity (load-more) use a fresh `UUID()` so each page render replaces them
 - [ ] `deinit` in `LoadResourcePresentationAdapter` cancels in-flight tasks

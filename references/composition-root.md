@@ -27,6 +27,8 @@ Jump to:
 
 The Composition Root is the **only place** that knows about all modules. It creates concrete instances, wires dependencies, and defines fallback strategies.
 
+Composers, presentation adapters, and proxies belong to the **app target**, never the UI framework module — the case study physically moved them out of the iOS framework once the app target existed. Note the deliberate composition asymmetry: feed loading is **remote-first** (freshness), image loading is **local-first** (image data per URL is immutable, so cache hits are always valid).
+
 ```swift
 @MainActor
 final class FeedService {
@@ -104,9 +106,11 @@ private func loadRemoteFeed(after: FeedImage? = nil) async throws -> [FeedImage]
 }
 ```
 
+`try? loader.save(feed)` is fire-and-forget by design — the customer still sees the feed if caching fails. Cache-on-success is a Composition Root concern: historically an explicit Decorator with a narrow save-only `FeedCache` protocol owned by the feature module.
+
 ### Parallel loading with `async let`
 
-Load cached items and new remote items concurrently to reduce user-facing latency:
+Zipping the cache load with the remote page exists so accumulated items are **not** held in closure memory — the cache is the single source of truth for previous pages. Reduced latency is a side benefit, not the motivation:
 
 ```swift
 private func loadMoreRemoteFeed(last: FeedImage?) async throws -> Paginated<FeedImage> {
@@ -206,7 +210,7 @@ Returns a closure — not the result. The Composition Root creates the closure, 
 
 ## Scheduler Protocol — Abstract Execution Context
 
-The Scheduler protocol abstracts whether store operations run on CoreData's background context or InMemory's main actor. This enables polymorphism without leaking threading details into the service layer.
+The Scheduler protocol abstracts whether store operations run on CoreData's background context or InMemory's main actor. This enables polymorphism without leaking threading details into the service layer. The protocol deliberately lives in the Composition Root (`FeedService.swift`), not the feature module — it is a wiring concern.
 
 ```swift
 protocol Scheduler {
@@ -232,13 +236,13 @@ extension InMemoryFeedStore: Scheduler {
 }
 ```
 
-**Why this abstraction exists**: The Composition Root must not know whether it is using CoreData or InMemory. Both satisfy `FeedStore & FeedImageDataStore & Scheduler & Sendable`. Tests inject `InMemoryFeedStore` and get synchronous execution. Production uses `CoreDataFeedStore` and gets background-context dispatch.
+**Why this abstraction exists**: The service code must not know whether it is using CoreData or InMemory. Both satisfy `FeedStore & FeedImageDataStore & Scheduler & Sendable`. Production uses `CoreDataFeedStore(.background)` and gets background-context dispatch. Acceptance tests inject the **real** `CoreDataFeedStore` with `contextQueue: .main` and get synchronous execution via the `.main` short-circuit above.
 
 ---
 
 ## InMemoryFeedStore — @MainActor Fallback
 
-Used as both a **production fallback** (when CoreData initialization fails) and a **test double** in acceptance tests (persists across simulated "launches").
+**Production-only** graceful-degradation fallback when CoreData initialization fails — not a test double. NSCache-backed image storage gives automatic eviction under memory pressure. It is contract-tested via the same `FeedStoreSpecs`/`FeedImageDataStoreSpecs` shared specs as CoreData.
 
 ```swift
 @MainActor
@@ -274,7 +278,7 @@ extension InMemoryFeedStore: FeedImageDataStore {
 }
 ```
 
-`@MainActor` is appropriate here because all composition code runs on the main actor. In acceptance tests, the same `InMemoryFeedStore` instance is passed across "launches" to verify cache behavior.
+`@MainActor` is appropriate here because all composition code runs on the main actor. Acceptance tests do **not** use this store — they inject the real `CoreDataFeedStore(storeURL: URL(fileURLWithPath: "/dev/null"), contextQueue: .main)`, which is effectively in-memory and synchronous. Test cache states (`.empty` / `.withExpiredFeedCache` / `.withNonExpiredFeedCache`) are `CoreDataFeedStore` factory extensions in the test target.
 
 ---
 
@@ -318,8 +322,9 @@ public final class CoreDataFeedStore: Sendable {
 - `Sendable` conformance enables safe passing across actor boundaries
 - `contextQueue` computed property lets `Scheduler` decide between synchronous (main) and async (background) execution
 - `@MainActor` on the convenience init ensures the shared `model` is accessed safely
+- The static `model` is loaded **once** and cached — loading the same `NSManagedObjectModel` twice registers duplicate `NSEntityDescription`s claiming the same `NSManagedObject` subclasses (undefined behavior)
 - `perform<T>` delegates to `NSManagedObjectContext.perform` for thread-safe CoreData access
-- `deinit` cleans up persistent store references
+- `deinit` cleans up persistent store references — the CoreData stack lives and dies with the instance, which matters when tests create many stores
 
 ---
 

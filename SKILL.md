@@ -1,11 +1,18 @@
 ---
 name: ios-architecture-expert
-description: >
-  Guides building modular, testable iOS/Swift applications following a
-  clean architecture methodology -- protocol-oriented design, composition
-  root, generic presenters, and modern Swift concurrency.
-  Use when designing features, structuring modules, composing dependencies,
-  or reviewing iOS architecture.
+description: >-
+  Use when the user is designing, structuring, refactoring, or reviewing the
+  architecture of an iOS/Swift app: separating features into modules/layers
+  (domain, API, cache, presentation, UI), wiring dependencies in a composition
+  root, breaking up massive view controllers, making code testable via
+  protocol boundaries and test doubles, adapter/proxy/pagination patterns, or
+  handling Sendable/@MainActor at module boundaries. Trigger even when
+  'architecture' isn't mentioned -- e.g. 'where should networking code live',
+  'my view controller is untestable', 'how do I split this into Swift
+  packages', 'MVVM vs MVP'. Do NOT use for pure SwiftUI view/state/styling
+  work (swiftui-expert), writing BDD specs or user stories
+  (requirements-engineering), Swift Testing syntax (swift-testing-expert), or
+  non-iOS architecture (Android, backend services).
 ---
 
 # iOS Architecture Expert — Clean Modular Architecture
@@ -22,7 +29,7 @@ When this skill is active, follow these rules **strictly**:
 6. **Tests drive the design** — one test class per use case, named by behavior (`CacheFeedUseCaseTests`, not `LocalFeedLoaderTests`). Use `makeSUT()` factory in every test class.
 7. **Use SPM multi-target packages** for module separation — `Feed` (Foundation), `FeediOS` (UIKit), `App` (composition).
 8. **Prefer async/await over closures/Combine** for async operations. Use `Task.immediate` for synchronous-first execution in adapters.
-9. **Use Swift Testing** (`@Test`, `#expect`) for new tests. Follow patterns in the `swift-testing-expert` skill when available.
+9. **Write new tests in the project's test framework.** The reference patterns here are XCTest, as in the source codebase. When the project uses Swift Testing, translate via the `swift-testing-expert` skill — note `trackForMemoryLeaks`/`addTeardownBlock` is XCTest-only.
 10. **Mark shared mutable state with `@MainActor`** — presenters, adapters, view controllers, and composition code run on the main actor.
 
 ---
@@ -39,6 +46,19 @@ When this skill is active, follow these rules **strictly**:
 | Sendable warning at composition boundary | Closure annotations | Add `@Sendable` + `@MainActor` | `references/concurrency-at-boundaries.md` |
 | Pagination won't load next page | `loadMore` closure | Verify recursive composition in `FeedViewAdapter` | `references/composition-root.md` |
 | Cache validation doesn't run | `Task.immediate` usage | Use fire-and-forget with `Task.immediate` | `references/concurrency-at-boundaries.md` |
+
+---
+
+## Gotchas
+
+- `Task.immediate` requires a Swift 6.2-era toolchain/recent deployment target (the case study targets iOS 26). On older targets, fall back to plain `Task` and handle the synchronous `didStartLoading` requirement explicitly.
+- `CoreDataFeedStore(storeURL: URL(fileURLWithPath: "/dev/null"), contextQueue: .main)` is effectively in-memory AND synchronous — it's what makes acceptance tests deterministic without sleeps.
+- Capture `[store]`, never `[self]`, in `@Sendable` closures created inside the `@MainActor` service — capturing self drags MainActor isolation into the closure (compile error under Swift 6).
+- `UIWindow(frame:)` is deprecated on iOS 26; tests build a dummy scene via `(UIWindowScene.self as NSObject.Type).init() as? UIWindowScene` (no public initializer exists).
+- `didEndDisplaying(cell:forRowAt:)` fires for OLD cells after a data-source update — never cancel by indexing the NEW model; cancel through a `[IndexPath: CellController]` registry populated in `cellForRowAt`.
+- Diffable data sources don't reflow on Dynamic Type changes — reload when `preferredContentSizeCategory` changes; use `applySnapshotUsingReloadData` guarded by an `itemIdentifiers` equality check.
+- `Thread.isMainThread` is not "on the main queue" (the main thread can run other queues) — prefer `@MainActor` isolation over runtime checks.
+- Load `NSManagedObjectModel` once and cache it statically — loading it twice registers duplicate `NSEntityDescription`s claiming the same `NSManagedObject` subclasses (undefined behavior).
 
 ---
 
@@ -69,7 +89,7 @@ When this skill is active, follow these rules **strictly**:
 | `Paginated<Item>` | Recursive pagination with optional `loadMore` closure (`Sendable`) |
 | Composition Root / `FeedService` | `@MainActor` orchestrator with lazy init, Scheduler, and fallback strategy |
 | `Scheduler` protocol | Abstract store execution context for CoreData/InMemory polymorphism |
-| `InMemoryFeedStore` | `@MainActor` fallback store — production fallback + acceptance test double |
+| `InMemoryFeedStore` | `@MainActor`, NSCache-backed PRODUCTION fallback when CoreData fails to init — not a test double (acceptance tests use the real `CoreDataFeedStore` at `/dev/null`) |
 | `LoaderSpy<Param, Resource>` | Generic async test spy using `AsyncThrowingStream` for UI integration tests |
 | Specification Pattern | Protocol-driven shared test specs across store implementations |
 | UI Composer (static factory) | Wire presenter->adapter->view chain per feature (`FeedUIComposer.feedComposedWith`) |
@@ -104,6 +124,7 @@ Starting a new feature? Follow this path:
 - Do not use `@unchecked Sendable` — redesign the type as a value type or use `@MainActor`
 - Do not embed cache policy logic inside the loader — keep it as a separate type
 - Do not put navigation logic in view controllers — use closure callbacks wired in the Composition Root
+- Do not generalize with a single client. The case study's rhythm is duplicate → generalize → replace → delete: copy the working concrete component for the second feature, and only extract generics (`LoadResourcePresenter`-style) once two green implementations exist side by side
 - Defer non-architectural concurrency questions to the `swift-concurrency` skill
 
 ---
@@ -139,5 +160,3 @@ Open the smallest reference that matches the question:
   - [testing-strategy.md](references/testing-strategy.md) — unit, spec, integration, snapshot, acceptance
 - **Workflow**
   - [feature-implementation-workflow.md](references/feature-implementation-workflow.md) — step-by-step feature building
-- **Navigation index**
-  - [references/_index.md](references/_index.md)
