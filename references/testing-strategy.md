@@ -430,7 +430,7 @@ extension CoreDataFeedStore {
 
 > Guardrail: never use `Task.sleep` to wait for loading in acceptance tests — `Task.immediate` + a main-context store makes launch synchronous; for genuinely-parallel side effects, poll for the state change with a timeout.
 
-**Avoid XCUITest acceptance tests with launch-argument/`#if DEBUG` back doors.** The case study built exactly that — a `DebuggingSceneDelegate` subclass, a `-reset` argument, a `connectivity` UserDefault — and then deleted the entire UI-test target in favor of these in-process tests. Constructor injection at the composition root replaces every test hook, and no test code ships in the production `SceneDelegate`.
+**Avoid XCUITest acceptance tests with launch-argument/`#if DEBUG` back doors.** The case study built exactly that — a `DebuggingSceneDelegate` subclass, a `-reset` argument, a `connectivity` UserDefault — and then deleted the entire UI-test target in favor of these in-process tests. Constructor injection at the composition root replaces every test hook, and no test code ships in the production `SceneDelegate`. (When you *do* have genuinely debug-only code — a debug menu, a simulator seam — the `#if DEBUG`-isolated `SceneDelegate` subclass is the right way to keep it out of release; see the "Debug-only code" pattern in `composition-root.md`.)
 
 ---
 

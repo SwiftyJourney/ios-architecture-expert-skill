@@ -1,4 +1,7 @@
-# iOS Architecture Expert Skill
+# iOS Architecture Expert Agent Skill
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Agent Skills](https://img.shields.io/badge/Agent-Skills-blue)](https://agentskills.io)
 
 A Claude Code skill that guides building modular, testable iOS/Swift applications following a clean architecture methodology — protocol-oriented design, composition root patterns, generic presenters, and modern Swift concurrency.
 
@@ -18,7 +21,7 @@ iOS developers who want AI-assisted guidance on:
 Install via [skills.sh](https://skills.sh):
 
 ```bash
-npx skills add swiftyjourney/ios-architecture-expert-skill
+npx skills add SwiftyJourney/ios-architecture-expert-skill
 ```
 
 ## Compatible Agents
@@ -48,7 +51,7 @@ npx skills add swiftyjourney/ios-architecture-expert-skill
 - `WeakRefVirtualProxy` — Retain cycle prevention via conditional conformance
 - `Paginated<Item>` — Recursive pagination model with `@Sendable` `loadMore`
 - `Scheduler` protocol — Abstract CoreData/InMemory execution context
-- `InMemoryFeedStore` — `@MainActor` production fallback + acceptance test double
+- `InMemoryFeedStore` — `@MainActor`, NSCache-backed production fallback when CoreData fails to init
 
 ### Testing Strategy
 
@@ -85,7 +88,10 @@ evals/                                   # Trigger eval queries + output-quality
 
 ## Related Skills
 
-- [swiftui-expert](https://github.com/SwiftyJourney/swiftui-expert-skill) — SwiftUI composition, state management, navigation
+- [Requirements Engineering](https://github.com/SwiftyJourney/requirements-engineering-skill) — Turn vague requirements into testable specs: BDD, use cases, contracts, diagrams
+- [SwiftUI Expert](https://github.com/SwiftyJourney/swiftui-expert-skill) — SwiftUI view code: state, composition, performance, animations, accessibility
+- [SwiftUI ⇄ UIKit Interop](https://github.com/SwiftyJourney/swiftui-uikit-interop-skill) — Bridge SwiftUI and UIKit: hosting controllers, representables, data across the boundary
+- [Swift Language Expert](https://github.com/SwiftyJourney/swift-language-expert-skill) — Non-obvious Swift language & standard-library techniques
 
 ## Credits
 

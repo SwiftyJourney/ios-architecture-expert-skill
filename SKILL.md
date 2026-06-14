@@ -46,6 +46,7 @@ When this skill is active, follow these rules **strictly**:
 | Sendable warning at composition boundary | Closure annotations | Add `@Sendable` + `@MainActor` | `references/concurrency-at-boundaries.md` |
 | Pagination won't load next page | `loadMore` closure | Verify recursive composition in `FeedViewAdapter` | `references/composition-root.md` |
 | Cache validation doesn't run | `Task.immediate` usage | Use fire-and-forget with `Task.immediate` | `references/concurrency-at-boundaries.md` |
+| Debug/test-only code in the production composition | `#if DEBUG` isolation | Move it to a `#if DEBUG` `SceneDelegate` subclass | `references/composition-root.md` |
 
 ---
 

@@ -18,6 +18,7 @@ Jump to:
 - [InMemoryFeedStore — Fallback](#inmemoryFeedstore--mainactor-fallback)
 - [CoreDataFeedStore — Sendable Wrapper](#coredatafeedstore--sendable-wrapper)
 - [SceneDelegate Wiring](#scenedelegate-wiring)
+- [Debug-only code: the `#if DEBUG` subclass pattern](#debug-only-code-the-if-debug-subclass-pattern)
 - [UI Composer — UIKit](#ui-composer--uikit-feeduicomposer)
 - [UI Composer — SwiftUI](#ui-composer--swiftui-equivalent)
 
@@ -376,6 +377,47 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 - Navigation closures (`showComments`) keep view controllers decoupled from loading logic
 - `lazy` properties ensure composition happens once, on first access
 
+### Debug-only code: the `#if DEBUG` subclass pattern
+
+When you legitimately need debug/test-only behavior in the composition root — a debug menu, a simulator-only seam, canned responses for UI tests — **do not scatter `#if DEBUG` branches through the production `SceneDelegate`.** Extract it into a `#if DEBUG`-guarded *subclass* that overrides the production composition's factory seams, and select that subclass only in debug builds. Release builds never compile, reference, or ship the debug code.
+
+```swift
+// AppDelegate — pick the debug delegate only in DEBUG builds
+func application(_ app: UIApplication,
+                 configurationForConnecting session: UISceneSession,
+                 options: UIScene.ConnectionOptions) -> UISceneConfiguration {
+    let configuration = UISceneConfiguration(name: nil, sessionRole: session.role)
+    #if DEBUG
+    configuration.delegateClass = DebuggingSceneDelegate.self
+    #endif
+    return configuration
+}
+
+#if DEBUG
+final class DebuggingSceneDelegate: SceneDelegate {
+    override func scene(_ scene: UIScene, willConnectTo session: UISceneSession,
+                        options: UIScene.ConnectionOptions) {
+        if CommandLine.arguments.contains("-reset") {
+            try? FileManager.default.removeItem(at: localStoreURL)   // clean state per UI-test run
+        }
+        super.scene(scene, willConnectTo: session, options: options)
+    }
+
+    // Override a production factory seam to swap in a canned-response client
+    override func makeRemoteClient() -> HTTPClient {
+        if let connectivity = UserDefaults.standard.string(forKey: "connectivity") {
+            return DebuggingHTTPClient(connectivity: connectivity)   // "online"/"offline" set by the UI test
+        }
+        return super.makeRemoteClient()
+    }
+}
+#endif
+```
+
+**Why**: the production `SceneDelegate` stays free of test/debug concerns (it just exposes overridable factory seams like `makeRemoteClient()`); the `#if DEBUG` guard guarantees none of this is in the release binary; and the launch-argument/`UserDefaults` flags (`-reset`, `connectivity`) let an out-of-process UI test drive app state. The same shape generalizes to any debug-only feature — isolate it in a `#if DEBUG` type, don't litter production with directives.
+
+> For **acceptance tests specifically**, prefer the in-process `convenience init(httpClient:store:)` seam above over launch-argument hooks — it's faster and needs no debug subclass (the case study ultimately deleted its UI-test target in favor of in-process tests; see `testing-strategy.md`). The `#if DEBUG`-isolated-subclass technique remains the correct way to keep *genuinely* debug-only code (debug menus, simulator seams) out of release.
+
 ---
 
 ## UI Composer — UIKit (`FeedUIComposer`)
@@ -445,6 +487,7 @@ In SwiftUI, `@Observable` replaces the adapter->proxy->presenter chain. The view
 - Do not skip the fallback — always handle CoreData initialization failure with `InMemoryFeedStore`
 - Do not use `DispatchQueue.main.async` in composition — use `@MainActor` annotation instead
 - Do not embed navigation logic in view controllers — use closure callbacks wired in the Composition Root
+- Do not scatter `#if DEBUG` branches through the production composition — isolate debug/test-only code in a `#if DEBUG`-guarded `SceneDelegate` subclass selected via `configuration.delegateClass`, so it never ships in release
 
 ## Verification
 
