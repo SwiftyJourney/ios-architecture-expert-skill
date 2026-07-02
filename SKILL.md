@@ -27,6 +27,7 @@ When this skill is active, follow these rules **strictly**:
 4. **Presentation logic is framework-agnostic** — presenters output view models (structs). No `UIImage`, `UIColor`, or SwiftUI types in the presentation layer.
 5. **All dependency wiring happens in the Composition Root** — the app target (or a dedicated `CompositionRoot` module). Feature modules never create their own dependencies.
 6. **Tests drive the design** — one test class per use case, named by behavior (`CacheFeedUseCaseTests`, not `LocalFeedLoaderTests`). Use `makeSUT()` factory in every test class.
+6b. **Test only the public API — no `@testable import`.** Test targets use a plain `import Feed`, never `@testable import Feed`. Tests exercise a module exclusively through its public surface; they never reach for `internal`/`private` members. If a behavior can't be observed publicly, that's a design signal — expose it through the module's public API (a protocol boundary, a return value, an injected collaborator/spy), not by widening access for the test. Same-target tests (e.g. acceptance tests in the app target) still assert through the composed public seams, not private state.
 7. **Use SPM multi-target packages** for module separation — `Feed` (Foundation), `FeediOS` (UIKit), `App` (composition).
 8. **Prefer async/await over closures/Combine** for async operations. Use `Task.immediate` for synchronous-first execution in adapters.
 9. **Write new tests in the project's test framework.** The reference patterns here are XCTest, as in the source codebase. When the project uses Swift Testing, translate via the `swift-testing-expert` skill — note `trackForMemoryLeaks`/`addTeardownBlock` is XCTest-only.
@@ -125,6 +126,7 @@ Starting a new feature? Follow this path:
 - Do not use `@unchecked Sendable` — redesign the type as a value type or use `@MainActor`
 - Do not embed cache policy logic inside the loader — keep it as a separate type
 - Do not put navigation logic in view controllers — use closure callbacks wired in the Composition Root
+- Do not use `@testable import` — test through the public API only; widen production access (`public`) intentionally rather than tunneling into `internal`/`private` from tests
 - Do not generalize with a single client. The case study's rhythm is duplicate → generalize → replace → delete: copy the working concrete component for the second feature, and only extract generics (`LoadResourcePresenter`-style) once two green implementations exist side by side
 - Defer non-architectural concurrency questions to the `swift-concurrency` skill
 
@@ -137,6 +139,7 @@ When implementing or reviewing architecture:
 1. Build with `SWIFT_STRICT_CONCURRENCY = complete` — zero warnings
 2. No UIKit/SwiftUI imports in Feature/API/Cache modules
 3. All protocol boundaries have corresponding test doubles
+3b. Test targets `import` modules plainly — grep for `@testable` returns nothing; every assertion goes through the public API
 4. `makeSUT()` exists in every test class
 5. CoreData store has `InMemoryFeedStore` fallback in Composition Root
 6. Run Thread Sanitizer (`-enableThreadSanitizer YES`) — zero data races

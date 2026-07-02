@@ -141,6 +141,8 @@ let package = Package(
 )
 ```
 
+> Test targets depend on the modules under test and `import` them plainly — **never** `@testable import`. Tests exercise each module through its public API only; if a test can't reach what it needs, expose a public seam rather than widening access. See [testing-strategy.md](testing-strategy.md#0-test-through-the-public-api-no-testable-import).
+
 ---
 
 ## Build Settings — Swift 6 Strict Concurrency

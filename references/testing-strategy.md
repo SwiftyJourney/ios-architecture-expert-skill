@@ -12,6 +12,7 @@ Skip this file if:
 - You need architecture layer details. Use `architecture-layers.md`.
 
 Jump to:
+- [Test Through the Public API](#0-test-through-the-public-api-no-testable-import)
 - [Unit Tests](#1-unit-tests)
 - [Extracting a Protocol Boundary](#extracting-a-protocol-boundary)
 - [Specification Pattern](#2-specification-pattern-shared-store-specs)
@@ -22,6 +23,40 @@ Jump to:
 - [Acceptance Tests](#5-acceptance-tests)
 - [Generic Async Test Spy](#generic-async-test-spy-loaderspy)
 - [Cross-Cutting Patterns](#cross-cutting-patterns)
+
+---
+
+## 0. Test Through the Public API (No `@testable import`)
+
+**Tests exercise a module only through its public surface.** Test targets use a plain `import Feed` — never `@testable import Feed`. This is not a stylistic preference; it is a design constraint that keeps the tests honest:
+
+- `@testable import` grants access to `internal` members, which lets tests couple to implementation details. When they do, refactoring internals breaks tests even though behavior is unchanged — the tests stop being a safety net and become friction.
+- Testing through the public API forces the module to *have* a usable public API. If a behavior is hard to assert from outside, the design — not the test — is telling you something: a missing protocol boundary, a return value that should be exposed, or a collaborator that should be injected.
+
+```swift
+// Test target — plain import, exercises FeedAPI's public surface only
+import XCTest
+import FeedAPI          // NOT @testable import FeedAPI
+
+class LoadFeedFromRemoteUseCaseTests: XCTestCase { ... }
+```
+
+### When a test can't reach what it needs
+
+Do **not** widen the test's reach with `@testable`. Instead, make the behavior observable through the public API:
+
+| You want to assert... | Public seam to expose it through |
+|---|---|
+| A collaborator was called with certain arguments | Inject a protocol; assert on a public spy conforming to it (`FeedStoreSpy: FeedStore`) |
+| A produced value | Return it from a public method / deliver it via a public completion or `async` result |
+| A mapped/derived result | Make the mapper a public static function and test it directly (`FeedItemsMapper.map(_:from:)`) |
+| A composed graph behaves end-to-end | Assert through the composed public seam (e.g. `SceneDelegate.init(httpClient:store:)` → rendered view state), not private fields |
+
+**Access-control implication**: production types, initializers, and methods that a test needs to reach must be declared `public` deliberately — that declaration *is* the module's contract. Test-only helpers and fixtures (spies, `makeSUT`, `.empty` store factories) live in the **test target**, so they need no production access at all.
+
+**Same-target tests** (acceptance tests that live in the app target alongside `SceneDelegate`) don't need `import` at all, but the rule still holds in spirit: assert through the composed public seams — the injected `SceneDelegate` initializer and the rendered view — never private state.
+
+> Guardrail: if a test only compiles with `@testable`, treat it as a missing public seam, not a reason to keep `@testable`.
 
 ---
 
@@ -595,6 +630,7 @@ func test_localizedStrings_haveKeysAndValuesForAllSupportedLocalizations() {
 
 ## Guardrails
 
+- Test through the public API — plain `import`, never `@testable import`; a test that needs `@testable` is a missing public seam, not a reason to keep it
 - Use `makeSUT()` in every test class — never share a `sut` across tests
 - Use enum-based message recording in spies — not boolean flags
 - Use `trackForMemoryLeaks` in XCTest for all reference-type SUTs and collaborators
@@ -603,6 +639,7 @@ func test_localizedStrings_haveKeysAndValuesForAllSupportedLocalizations() {
 
 ## Verification
 
+- [ ] No `@testable import` anywhere in the test targets — every assertion goes through the public API
 - [ ] Every test class has a `makeSUT()` factory method
 - [ ] Every `makeSUT()` in XCTest calls `trackForMemoryLeaks` on reference types
 - [ ] Spy collaborators use `enum ReceivedMessage` for method recording
