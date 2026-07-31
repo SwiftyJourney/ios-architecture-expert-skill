@@ -134,3 +134,6 @@ iOSInjectionProject/
 
 # Local reference material (not part of skill distribution)
 case-study/
+
+# Local agent config
+.claude/
