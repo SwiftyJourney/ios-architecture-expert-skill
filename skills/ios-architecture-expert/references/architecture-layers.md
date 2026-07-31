@@ -10,14 +10,69 @@ Skip this file if:
 - You need Composition Root wiring. Use `composition-root.md`.
 - You need adapter/proxy patterns. Use `adapters-and-proxies.md`.
 - You need concurrency annotations rationale. Use `concurrency-at-boundaries.md`.
+- You need the *reasoning* for a boundary rather than the code. Use `design-principles.md`.
 
 Jump to:
+- [Three kinds of logic](#three-kinds-of-logic--the-framing)
+- [Do you even need a persistence layer?](#do-you-even-need-a-persistence-layer)
 - [Feature Layer](#feature-layer-foundation-only)
 - [API Layer](#api-layer-foundation-only)
 - [Cache Layer](#cache-layer-foundation-only)
 - [Presentation Layer](#presentation-layer-foundation-only)
 - [UI Layer — UIKit](#ui-layer--uikit)
 - [UI Layer — SwiftUI](#ui-layer--swiftui-equivalent)
+
+---
+
+## Three kinds of logic — the framing
+
+The layer table in `SKILL.md` is a *file layout*. The rule that decides what goes where is
+narrower: every line of code is one of three things.
+
+| Kind | Example here | Deterministic? |
+|---|---|---|
+| **Application-specific** (use case / interactor / control boundary) | `LocalFeedLoader` — delete then insert with a timestamp | No — orchestrates side effects |
+| **Application-agnostic** (business model / policy) | `FeedCachePolicy` — "expired" is a rule, not an app feature | Yes |
+| **Framework** (infrastructure) | `CoreDataFeedStore`, `URLSessionHTTPClient` | No — *is* the side effect |
+
+This is why the cache policy is a separate type from the loader, why the store contains no
+conditional logic, and why models take injected data rather than injected functions. Full argument
+and the diagnostics that go with it: [design-principles.md](design-principles.md#three-kinds-of-logic).
+
+---
+
+## Do you even need a persistence layer?
+
+Before building a cache layer, check whether the platform already gives you one. The URL Loading
+System caches HTTP/HTTPS responses in memory and on disk via `URLCache` — you can get that for
+free by configuring a `URLSessionConfiguration`:
+
+```swift
+let cache = URLCache(memoryCapacity: 10_000_000, diskCapacity: 50_000_000)
+let configuration = URLSessionConfiguration.default
+configuration.urlCache = cache
+configuration.requestCachePolicy = .returnCacheDataElseLoad
+let session = URLSession(configuration: configuration)
+```
+
+If that satisfies the requirement, the store protocol, the local model, the cache policy, the
+local loader and the fallback composition **all go away**.
+
+| `URLCache` fits | `URLCache` is the wrong tool |
+|---|---|
+| Static-ish responses that change rarely | Offline *actions* (queue a like, upload later) |
+| Small payloads | Anything needing your own expiry policy or eviction rules |
+| Server sends correct `Cache-Control` | Data you must query, mutate or relate |
+
+Caveats worth knowing: a response is cached only if it is an HTTP(S) request, the response
+succeeded, it wasn't itself served from cache, both the session and request policies allow it, the
+server's headers allow it, and the payload is small relative to the disk cache. Replacing
+`URLCache.shared` mutates global state, so do it as early as possible in the app lifecycle — or,
+better, inject your own session and never touch the shared one.
+
+> The two are not exclusive: a custom persistence strategy can sit alongside `URLCache`. But when
+> the app defines its own caching policy, use `.ephemeral` for the session so `URLCache` does not
+> silently duplicate it — as this codebase does (`composition-root.md`).
 
 ---
 
@@ -133,7 +188,20 @@ public protocol HTTPClient {
 **Rules**: Mappers are `final class` with `static` methods — no instances. Decodable types are `private`. Errors are typed enums. `HTTPClient` is a protocol, not `URLSession` directly.
 
 - **Status-code contracts are per endpoint.** The feed mapper accepts exactly `200`; the image-comments mapper accepts any `2xx` (`(200...299).contains(...)`). Assert the exact accepted range per mapper — do not share one `isOK`.
-- **Pagination is keyset-based**, not offset: `after_id=<last item's id>`. Keying on the last item's identity stays stable when the feed mutates between requests, unlike an offset.
+- **Pagination is keyset-based** (a.k.a. the seek method), not limit/offset: `after_id=<last item's id>`.
+
+| | Limit / offset | Keyset |
+|---|---|---|
+| Backend cost | Trivial (`LIMIT`/`OFFSET`) | Harder to implement |
+| Random access to page N | Yes | No — next/previous only |
+| Large offsets | Slow | Fast |
+| Consistency while the data mutates | **Broken** — an insert shifts everything, producing duplicates and omissions | Stable — the key does not move |
+| Variable page size mid-traversal | Not safe | Safe |
+| Cacheable | Not really | **Yes** |
+
+  Use limit/offset for small, short-lived, rarely-changing collections you will not cache (a
+  currency list). Use keyset for infinite scroll and anything you cache — which is most feeds, and
+  why consistent caching is the reason this codebase uses it, not the latency.
 - **Do not define single-method loader protocols** (`FeedLoader`). The Composition Root composes `HTTPClient` + a static mapper into a plain `() async throws -> Resource` closure — the closure *is* the abstraction; the protocol just adds a name.
 
 ---
@@ -229,7 +297,24 @@ final class FeedCachePolicy {
 
 **Rules**: `LocalFeedLoader` converts between `FeedImage` <-> `LocalFeedImage` at the boundary (private `toLocal()`/`toModels()` `Array` extensions). `currentDate` is injected as a closure for test control. Cache policy is a separate type — not embedded in the loader. Store protocol uses `throws` (not callbacks).
 
+### Why `LocalFeedImage` is not duplication
+
+`LocalFeedImage` mirrors `FeedImage` field for field, and that is the point. They are **Data
+Transfer Model Representations**: separate types that happen to look alike today and will change
+for different reasons tomorrow — a cache migration must not ripple into the domain, and a domain
+addition must not force a store rewrite. Separating them lets each change at its own pace, and
+lets the modules be developed in parallel.
+
+The forcing constraint is that **a type can conform to a protocol only once**. A shared model
+cannot carry two different `Decodable` implementations for two different APIs, or a `Codable` for
+the file system *and* an `@Model` for SwiftData. Whoever gets there first wins permanently.
+
 > **Guardrail**: do not add `Codable`/`@Model`/persistence conformances to `LocalFeedImage` — that is a framework-specific detail. Wrap it in a private type inside the store (`ManagedFeedImage`, `CodableFeedImage`) and convert at the boundary, mirroring the API layer's private-`Decodable` rule.
+
+Beyond correctness, this is about the message left behind: a persistence conformance on a
+framework-agnostic model tells the next developer it is fine to add Realm or CoreData details
+there too. The mapping cost is a couple of private array extensions — measure before deciding it
+is too expensive, and if you have no measurement, optimize for maintainability.
 
 ---
 
@@ -402,7 +487,7 @@ For SwiftUI specifics (state management, view composition, `@Observable` pattern
 
 - [ ] Feature layer has zero framework imports beyond Foundation
 - [ ] All domain models are `struct`, `Hashable`, `Sendable`
-- [ ] All use-case boundaries are protocols (not concrete types)
+- [ ] No layer references a concrete type from another layer — every boundary is a protocol (multiple strategies) or a composed closure (one)
 - [ ] View protocols (`ResourceView`, `ResourceLoadingView`, `ResourceErrorView`) are `@MainActor`
 - [ ] Mapper Decodable types are `private`
 - [ ] `LocalFeedImage` is decoupled from `FeedImage` (separate type)

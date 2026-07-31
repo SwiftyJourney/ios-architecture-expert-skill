@@ -13,6 +13,8 @@ Skip this file if:
 - You need to understand architectural layers. Use `architecture-layers.md`.
 
 Jump to:
+- [What the Composition Root is](#what-the-composition-root-is)
+- [Object lifetimes, containers and coordinators](#object-lifetimes-containers-and-coordinators)
 - [FeedService — @MainActor Orchestrator](#feedservice--mainactor-orchestrator)
 - [Scheduler Protocol](#scheduler-protocol--abstract-execution-context)
 - [InMemoryFeedStore — Fallback](#inmemoryFeedstore--mainactor-fallback)
@@ -21,6 +23,83 @@ Jump to:
 - [Debug-only code: the `#if DEBUG` subclass pattern](#debug-only-code-the-if-debug-subclass-pattern)
 - [UI Composer — UIKit](#ui-composer--uikit-feeduicomposer)
 - [UI Composer — SwiftUI](#ui-composer--swiftui-equivalent)
+
+---
+
+## What the Composition Root is
+
+> The **root module**: the one place that imports every other module and composes them. **No other
+> module references it.**
+
+Three consequences follow from "no other module references it", and they are all load-bearing:
+
+1. **Its types need not be `public`.** Nothing outside can depend on them, so there is nothing to
+   declare.
+2. **`@testable import` is legitimate *here specifically*.** The no-`@testable` rule exists to stop
+   tests coupling to a module's internals; a root module has no external clients whose contract
+   could rot. Everywhere else, a test that needs `@testable` is a missing public seam — see
+   `testing-strategy.md`.
+3. **Feature modules must never depend on the Composition Root.** That is the anti-pattern that
+   creates circular dependencies and exposes every module to every other. If a feature needs
+   something from the root, invert it: pass a closure in.
+
+`SceneDelegate` and `AppDelegate` are part of the root and are **ordinary classes** — if there is
+code in them, you can test it. When a framework method cannot be invoked from a test (no public
+initializer for `UISceneConnectionOptions`), **move the logic into a method you can invoke** and
+leave the untestable one doing exactly one thing: calling it. That is why `configureWindow()`
+exists separately from `scene(_:willConnectTo:options:)` below.
+
+**Without a Composition Root you lose the benefits of everything else.** If every module creates
+its own dependencies you can follow every pattern in this skill and get none of the payoff — you
+do all the work and keep all the coupling.
+
+---
+
+## Object lifetimes, containers and coordinators
+
+### Singleton lifetime is not the Singleton pattern
+
+`FeedService`'s `lazy var httpClient` and `store` are created once and shared across features.
+That is a **singleton lifetime** — a composition decision. It is *not* the **Singleton pattern**,
+which enforces one instance globally and lets any type locate it.
+
+| | Lifetime | Where the decision lives |
+|---|---|---|
+| `httpClient`, `store` | Singleton — created once, shared | Composition Root |
+| `LocalFeedLoader`, presenters, adapters | Transient — created per use | Composition Root |
+
+If you do use a real singleton, **only the Composition Root may know about it.** No component
+accesses `.shared` directly; that is an implementation detail the root hides behind an injected
+dependency.
+
+### DI containers
+
+Same rule, stronger: **no component outside the Composition Root may reference a container.**
+Otherwise you couple every feature to the container and, transitively, to whatever the container
+depends on.
+
+### Coordinators, flows and routers
+
+They belong here too — and they should arrive **when complexity demands them, not before**. These
+objects carry their own complexity; introducing them without the navigation complexity that
+justifies them is a net loss. When you do add them, they live in the Composition Root (or in
+modules), never inside features — otherwise you have re-coupled the features you just separated.
+
+For simple transitions, pushing a view controller directly is fine — presenting an alert, or a
+child screen whose data you already hold. It stops being fine when the destination needs a
+non-trivial object graph: then the source screen would have to know every dependency of the
+destination. Route the selection out as a closure and let the root compose the destination:
+
+```swift
+// The list knows only that something was selected. The root knows what that means.
+FeedUIComposer.feedComposedWith(feedLoader: ..., imageLoader: ..., selection: showComments)
+```
+
+`show(_:sender:)` / `showDetailViewController(_:sender:)` let UIKit decide push vs modal vs split
+view, so the presenting controller need not understand its own presentation context.
+
+> Putting navigation in the presenter (VIPER-style) moves the problem rather than solving it — the
+> coupling is still there, just relocated.
 
 ---
 
@@ -70,6 +149,42 @@ final class FeedService {
 - Protocol composition (`FeedStore & FeedImageDataStore & Scheduler & Sendable`) constrains the store type at the wiring site
 - Fallback pattern: CoreData -> InMemory on failure
 - `@MainActor` ensures all composition happens on the main thread
+
+### Failure handling and logging — why it looks like this
+
+The `assertionFailure` + `logger.fault` + fallback triple in the `store` initializer is a
+deliberate shape, not defensive noise:
+
+- **`catch { print(error) }` is the anti-pattern.** Swallowing an error and continuing — often
+  alongside optional dependencies and `guard let` bail-outs that make critical collaborators
+  optional — hides the fact that the app is now running in a faulty state. Code that quietly
+  ignores messages is *less* safe, not more.
+- **Safe code is not crash-free code.** Safe code does not let the system reach an invalid state.
+  If it does reach one, crashing is the safe response — it preserves integrity. A
+  "99.9% crash-free" metric can be met by swallowing everything.
+- **`assertionFailure` crashes in debug, no-ops in release.** You get the fast feedback during
+  development without shipping the crash.
+- **`Logger` records the fault in release**, so a fallback that escapes to production is
+  traceable. The API is library-agnostic — the same call site works with Crashlytics or Datadog.
+- **The fallback is what makes this non-fatal**: a store that fails to initialize degrades to
+  in-memory rather than taking the app down. Reserve that for genuinely non-critical components.
+
+**Log from the Composition Root, not from inside components.** This is how you avoid injecting a
+logger into every module or reaching for a global one — the root already knows the concrete types
+and can decorate the specific instances that need observing. Logging is a cross-cutting concern;
+apply it with a decorator (`adapters-and-proxies.md`), not by threading a logger through your
+domain.
+
+Two practical notes:
+
+- **Measure elapsed time with `CACurrentMediaTime()`, not `Date()`** — wall-clock time gets
+  synchronized and produces inconsistent measurements.
+- **Temporary diagnostic logs are not committed.** Once a test proves the behaviour, the log is
+  noise. Keep permanent logs only for what you genuinely cannot test.
+
+> The costs are real: logging is more code obscuring application code, it is not free (disk,
+> network), and **the more you log, the less you can find**. Optimize in the infrastructure layer,
+> never by polluting business logic with instrumentation.
 
 ### Remote-with-local-fallback pattern
 

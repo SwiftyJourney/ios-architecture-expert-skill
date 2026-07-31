@@ -39,6 +39,33 @@
         "Uses Swift Testing (@Test, #expect, @Suite or struct-based suite), not XCTest's XCTestCase/XCTAssert",
         "currentDate is injected as a () -> Date closure fixed to a constant in tests, and a test verifies the insert received exactly that injected timestamp; there is a test that deletion error prevents insert (receivedMessages == [.deleteCachedGallery] and the error is rethrown); no CoreData/FileManager/URLSession appears anywhere in the tests"
       ]
+    },
+    {
+      "id": "presentation-pattern-selection-and-refactor",
+      "prompt": "Our ProfileViewController is a mess and my lead says we should 'move to MVVM'. It's ~400 lines: it calls ProfileService.shared.fetch(), formats the join date into 'Member since March 2023', converts the avatar Data into a UIImage, shows/hides a spinner and an error label, and pushes SettingsViewController when you tap the gear. We're also starting a watchOS app that shows the same profile info. Which pattern should we actually use and why? Refactor it and write the resulting files to the output directory.",
+      "expected_output": "A recommendation grounded in the actual problem (cross-platform reuse of presentation logic + value transformation living in the controller), not in the acronym the lead named. The formatting and state logic moves into a framework-free presentation type; the controller becomes a passive view; navigation and instantiation move to a composition site; and the answer explains what MVVM vs MVP would each buy here rather than just picking one.",
+      "assertions": [
+        "The answer explicitly reasons about WHICH pattern fits and why, referencing the two real forces in the prompt (presentation logic must be reused on watchOS, and value transformation currently lives in the controller) -- it does not simply comply with 'move to MVVM' without justification",
+        "The extracted presentation type (view model or presenter) has no 'import UIKit'/'import SwiftUI': the join-date string is produced there, and avatar bytes cross the boundary as Data (or via an injected (Data) -> Image transformer), never as UIImage",
+        "Date/locale/calendar dependencies used for the 'Member since' formatting are injected (with defaults) rather than read from the environment inside the formatting code, so the output is deterministic in tests",
+        "ProfileService.shared is no longer referenced by the controller or the presentation type; the dependency is injected and created at a composition site (composer/factory/composition root)",
+        "Navigation to SettingsViewController is removed from the view controller and exposed as a closure/callback that the composition site wires",
+        "If a presenter holds a reference to the view, the view reference is NOT declared weak on the presenter -- lifetime is handled at the composition site (e.g. a weak-reference proxy) or via SwiftUI/@Observable ownership, and the answer says why memory policy belongs to the composer",
+        "The view controller ends up passive: it renders what it is given and makes no formatting or presentation decisions"
+      ]
+    },
+    {
+      "id": "cqs-split-bloated-use-case",
+      "prompt": "Code review question. This is our LocalArticleLoader.load() and it's getting complicated -- reviewers keep arguing about it. Is there anything actually wrong with the design here, or is it fine?\n\n```swift\npublic final class LocalArticleLoader {\n    private let store: ArticleStore\n    private let currentDate: () -> Date\n\n    public func load() throws -> [Article] {\n        do {\n            guard let cache = try store.retrieve() else { return [] }\n            if Calendar(identifier: .gregorian).date(byAdding: .day, value: 7, to: cache.timestamp)! > currentDate() {\n                return cache.articles.toModels()\n            } else {\n                try store.deleteCachedArticles()\n                return []\n            }\n        } catch {\n            try store.deleteCachedArticles()\n            return []\n        }\n    }\n}\n```",
+      "expected_output": "A diagnosis that names Command-Query Separation: load() is a query that also mutates state, and the hidden 'invalidation' requirement is what makes it complicated. The fix splits it into a side-effect-free load() query and a separate validateCache() command, and extracts the 7-day expiry rule into its own policy type with the constant kept private. The answer should treat this as a requirements clarification first, not only a code move.",
+      "assertions": [
+        "The answer names Command-Query Separation (or 'a query with side effects') as the core problem: load() both returns data and deletes the cache",
+        "It proposes splitting into two separate operations -- a side-effect-free load/query and a distinct validate/invalidate command that can be scheduled independently (e.g. on entering background)",
+        "The 7-day expiry rule is extracted into a separate, stateless policy type (static/pure function taking the timestamp and a reference date) rather than remaining inline in the loader",
+        "The answer notes that the max-cache-age constant should be private to the policy so callers and tests do not depend on the literal value",
+        "The calendar/date arithmetic is flagged: it is not recalculated inline per call with a force-unwrap, and day-based math goes through Calendar rather than a fixed 24*60*60 interval",
+        "The answer identifies that the invalidation behaviour is an implicit/undocumented requirement and says the specification should be clarified, not just that the code should be moved around"
+      ]
     }
   ]
 }

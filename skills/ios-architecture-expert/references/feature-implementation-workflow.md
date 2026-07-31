@@ -11,6 +11,9 @@ Skip this file if:
 - You need testing patterns in depth. Use `testing-strategy.md`.
 
 Jump to:
+- [TDD rhythm](#tdd-rhythm-applies-to-every-step-below)
+- [Spy-first, protocol-last](#spy-first-protocol-last)
+- [The inbox checklist](#the-inbox-checklist)
 - [Step 1: BDD Specs](#step-1-define-bdd-specs)
 - [Step 2: Domain Model](#step-2-create-domain-model-feature-layer)
 - [Step 3: Concurrency Annotations](#step-3-add-concurrency-annotations)
@@ -22,6 +25,7 @@ Jump to:
 - [Step 9: Acceptance Tests](#step-9-write-acceptance-tests)
 - [Step 10: Snapshot Tests](#step-10-add-snapshot-tests)
 - [Step 11: Concurrency Verification](#step-11-concurrency-verification)
+- [Extracting a type from legacy code](#extracting-a-type-from-legacy-code)
 
 ---
 
@@ -36,6 +40,62 @@ Build a UI prototype with static data first to validate UX with zero architectur
 - One observable behavior per commit; refactor only on green.
 - Move the type to the production target (adding `public`/`final`) as its own refactor step, once the collaborator boundary has stabilized.
 - Add protocol conformances in separate commits, when composition actually needs them.
+
+> This section covers only the process that **shapes the design**. Test-writing craft — naming,
+> doubles, DSLs, coverage, commit discipline — belongs to the testing skill.
+
+### Spy-first, protocol-last
+
+This is *how* every protocol boundary in this skill was discovered. Do not design the boundary up
+front:
+
+1. Write the test against a **concrete spy class** you declare in the test file.
+2. Add API to the spy **progressively**, one method at a time, as each new test demands it. You
+   are not tied to a protocol yet, so you are not constantly fixing conformances.
+3. When the collaboration stops changing, **extract the protocol from the spy** — containing
+   exactly the methods and types the client actually needed, and nothing else.
+
+The result is a boundary shaped by the *use case*, never by the infrastructure's API surface. A
+protocol written first is a guess; a protocol extracted last is a record of what was required.
+
+Corollary: **test what must NOT happen.** Codebases routinely assert that a method was called and
+never that it was *not* called when it shouldn't have been. "Does not delete the cache when the
+cache is already empty" is the test that protects against calling the right method at the wrong
+time — and it is the test that reveals a use case is doing too much.
+
+### The inbox checklist
+
+Use cases give you a checklist for business logic — the primary course and each named error course
+is a case to implement. **Infrastructure has no such document**, and nobody can write it for you:
+your product owner cannot answer "what should happen if two threads insert and delete
+simultaneously?" Those are engineering decisions.
+
+So write the checklist yourself before writing the first test. For a store boundary:
+
+| Operation | Cases |
+|---|---|
+| retrieve | empty cache → empty; **twice on empty → same result (no side effects)**; non-empty → found; **twice on non-empty → same result**; error *if applicable* |
+| insert | to empty → stores; to non-empty → **overrides**; error *if applicable* (no permission, no space) |
+| delete | on empty → no error, stays empty; on non-empty → empties it; error *if applicable* |
+| all | side effects run **serially** — this is a requirement, so it gets a test |
+
+Two things make this checklist earn its keep:
+
+- **"If applicable"** is where Interface Segregation comes from — an in-memory store can never
+  fail, a file-system store can. That distinction becomes the `Failable*` spec protocols.
+- **It is splittable.** Three people can take retrieve, insert and delete independently, and the
+  same list ships as documentation, or as an executable spec suite for external implementers.
+
+Expect to get some expectations wrong. Revise the checklist; leave the unit tests behind as the
+regression net.
+
+### Triangulate at hard limits
+
+For any boundary rule (a 7-day expiry, a status-code range), write **three** tests: just inside,
+exactly on, and just outside the limit. A single one-sided test hides an inverted comparison. Keep
+all three afterwards — they are what stops a later refactor from silently moving the boundary.
+
+The same shape applies to collections: test **zero, one, and many**.
 
 ## Step 1: Define BDD Specs
 
@@ -310,6 +370,44 @@ Never create generics for a single client — duplication across two features is
 
 > Migrating an *existing* protocol boundary (sync→async, completion→`throws`)? See the migration playbook in `concurrency-at-boundaries.md` — same incremental, tests-green-throughout discipline.
 
+---
+
+## Extracting a type from legacy code
+
+**Legacy code is code with no tests.** Extracting a type out of it — into its own module, or just
+out of a bloated one — has an algorithm. Follow it and it is mechanical; improvise and you will
+lose behavior silently.
+
+1. **Create a NEW type. Do not move the old one.** This is the step people skip and the one the
+   whole method rests on. The new type starts empty and grows one tested behavior at a time.
+2. **Open the old implementation in a split pane. It is your checklist.** Every method and branch
+   in it is a behavior you owe a test.
+3. **Write the failing test first, then paste.** The rule is absolute: *you only paste code once
+   you have seen a failing test.* Add an empty method body to make it compile, watch it fail for
+   the right reason, then bring the implementation over. Do this even for a trivial static
+   property — return an empty string first and see the test go red.
+4. **Follow the compiler.** After pasting, bring across only what it asks for: the protocol, then
+   the view model, then the spy conformance. Bring things *partially* if only part is used.
+5. **Do not test protocols.** They have no implementation. Copy them.
+6. **Move resources with the code.** Localized `.strings` tables, asset catalogs, CoreData models —
+   create fresh ones in the destination module rather than dragging shared files and breaking the
+   source module. Verify target membership afterwards. The tests are what catch a forgotten asset.
+7. **Move to production last.** Once green, create the production folder, move the types, and let
+   the compiler show you exactly which API needs to become `public`. Public only what crosses the
+   module boundary; test helpers and factories stay internal.
+8. **Delete the old duplicate and follow the compiler errors.** Add imports, widen access, re-point
+   test helpers at the new bundle, and migrate the old localization tests too.
+
+Two notes that keep this safe:
+
+- **Behavior parity, not code parity.** The new implementation need not be identical — it needs the
+  same behavior and the same interface.
+- **A type that becomes `public` must be tested in isolation.** While it was internal it could be
+  covered through integration with its client; once it is part of the module's contract, a failure
+  in it must point at *it*, not at whatever composed it.
+
+Moving code between modules is delicate. Commit often, so every step has a green state to revert to.
+
 ## Guardrails
 
 - Do not skip BDD specs — they drive the acceptance tests in Step 9
@@ -317,6 +415,9 @@ Never create generics for a single client — duplication across two features is
 - Do not wire dependencies outside the Composition Root
 - Do not add concurrency annotations retroactively — Step 3 ensures they are baked in from the start
 - Do not generalize with a single client — duplicate first; extract generics only once two features share the behavior
+- Do not design a protocol boundary up front — grow it on a spy and extract it last
+- Do not start infrastructure work without an inbox checklist — nobody else can write it for you
+- Do not move a type out of legacy code — create a new one and paste only behind failing tests
 
 ## Verification
 

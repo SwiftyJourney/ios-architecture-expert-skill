@@ -9,11 +9,12 @@ Use this when:
 - You are enabling `SWIFT_STRICT_CONCURRENCY = complete`
 
 Skip this file if:
-- You need general Swift Concurrency guidance (actors, task groups, async sequences). Use the `swift-concurrency` skill instead.
+- You need general Swift Concurrency guidance (actors, task groups, async sequences). Use the `swift-language-expert` skill (`references/concurrency-and-errors.md`).
 - You need to wire adapters or proxies. Use `adapters-and-proxies.md`.
 - You need Composition Root orchestration details. Use `composition-root.md`.
 
 Jump to:
+- [Asynchrony is an infrastructure detail](#asynchrony-is-an-infrastructure-detail)
 - [Scheduler Protocol](#scheduler-protocol--abstract-execution-context)
 - [@Sendable Closures at Composition Boundaries](#sendable-closures-at-composition-boundaries)
 - [Task.immediate Pattern](#taskimmediate-pattern)
@@ -22,6 +23,93 @@ Jump to:
 - [Swift 6 Strict Concurrency — Architectural Impact](#swift-6-strict-concurrency--architectural-impact)
 - [Migration Playbook: Closures/Combine → async/await](#migration-playbook-closurescombine--asyncawait)
 - [Swift 6 / UIKit Interop Gotchas](#swift-6--uikit-interop-gotchas)
+
+---
+
+## Asynchrony is an infrastructure detail
+
+This section is the *why* behind `Scheduler`, and behind the fact that `FeedStore` is a
+**synchronous `throws` protocol** in a codebase built on async/await. It looks backwards until you
+see the argument.
+
+### The leak
+
+If a low-level component exposes an async API, every caller above it must handle asynchrony too —
+so you end up making the whole call chain async because *one* implementation (CoreData) needs it.
+That is a **leaky abstraction**: not all store implementations are async. An in-memory store is
+not. Yet the async-ness of one implementation has infected the boundary, the use case, and
+everything above.
+
+Wrapping the boundary in `AnyPublisher` (or any other async-returning type) does not fix it — it
+still leaks asynchrony *and* couples the domain abstraction to a concurrency framework.
+
+### The rule
+
+> **Prefer synchronous APIs in domain and infrastructure abstractions. Inject asynchrony at the
+> composition site.**
+
+Synchronous APIs are much simpler to implement, test and maintain, and you want high-level
+components to be as simple as possible because that is where correctness matters most. Compare:
+
+```swift
+// Async boundary: nested completions, escaping closures, cancellation, dealloc tests
+func save(_ feed: [FeedImage], completion: @escaping (Result<Void, Error>) -> Void) {
+    store.deleteCachedFeed { [weak self] result in
+        guard let self else { return }
+        switch result { ... }          // and another level for insert
+    }
+}
+
+// Sync boundary: the use case IS the recipe
+public func save(_ feed: [FeedImage]) throws {
+    try store.deleteCachedFeed()
+    try store.insert(feed.toLocal(), timestamp: currentDate())
+}
+```
+
+The second version deletes whole categories of test: "does not deliver result after the instance
+was deallocated" and the cancellation tests **cannot happen anymore**. You get cancellation for
+free from composition instead.
+
+**This is not an anti-async position.** `HTTPClient` is legitimately async — the network genuinely
+is. The point is to put asynchrony where it belongs rather than letting it propagate by default.
+
+### Where the asynchrony goes instead
+
+Two placements, and the difference matters:
+
+| | Blocking | Non-blocking |
+|---|---|---|
+| Mechanism | `performAndWait` inside the low-level component | `perform { }` moved **up** to the composition site |
+| Caller | Blocked — unacceptable on the main queue | Free |
+| API shape | Sync | Sync |
+
+The non-blocking form is what `Scheduler.schedule` implements: the component exposes a
+synchronous API, and the **composer** decides which execution context wraps the call.
+
+> **The database-transaction analogy.** A backend wraps a whole endpoint in a transaction at the
+> composition level; the use case has no idea it is running in a transaction scope. Making the use
+> case start, commit and roll back the transaction itself would push a low-level storage detail
+> into business logic — and would break the day you use a storage mechanism without transactions.
+> Wrapping store calls in a context queue is the same move.
+
+### The payoff
+
+> **Your components do not need to be thread-safe** if you control threading as a cross-cutting
+> concern in the Composition Root.
+
+That is the whole trade. One rule follows: **every operation on a non-thread-safe component must
+go through the same scheduler.** A serial queue owned by the composer, or CoreData's own context
+queue, is what makes that true. (CoreData *is* thread-safe as long as every access goes through
+`perform`/`performAndWait`, which is why its scheduler may be concurrent.)
+
+You can have as many schedulers as you want — one per domain module, or one for everything. It is
+a composition decision, and it is also what lets acceptance tests inject an immediate,
+main-queue scheduler and run synchronously.
+
+**Know where a threading test belongs.** "Dispatches to the main thread" is a *composition*
+concern, so it is tested in the UI integration/composition tests — not in the CoreData
+implementation, which has no idea a UI exists.
 
 ---
 
@@ -264,7 +352,9 @@ Order matters — from the case study's migration history:
 - Do not use `@unchecked Sendable` — redesign the type as a value type or use `@MainActor`
 - Do not use `DispatchQueue`, semaphores, or locks in async contexts — use actors or `Mutex`
 - Do not capture `self` in `@Sendable` closures when `self` is `@MainActor` — capture specific `Sendable` properties instead (e.g., `[store]`, `[httpClient]`)
-- Defer general concurrency questions (task groups, async sequences, actor reentrancy) to the `swift-concurrency` skill
+- Do not make a domain or store boundary `async` because one implementation happens to be — keep it synchronous and inject the execution context at the composition site
+- Do not make components thread-safe individually when the Composition Root can own threading as a cross-cutting concern — but if you take that route, route *every* call through the same scheduler
+- Defer general concurrency questions (task groups, async sequences, actor reentrancy) to the `swift-language-expert` skill (`references/concurrency-and-errors.md`)
 
 ## Verification
 

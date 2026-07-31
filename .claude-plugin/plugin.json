@@ -1,6 +1,6 @@
 {
   "name": "ios-architecture-expert",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Expert guidance for building modular, testable iOS/Swift apps following a clean architecture methodology. Protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.",
   "author": {
     "name": "SwiftyJourney",
@@ -21,9 +21,11 @@
     "sendable",
     "main-actor",
     "modular",
-    "apple-platforms"
-  ],
-  "skills": [
-    "./"
+    "apple-platforms",
+    "mvvm",
+    "mvp",
+    "mvc",
+    "design-patterns",
+    "solid"
   ]
 }

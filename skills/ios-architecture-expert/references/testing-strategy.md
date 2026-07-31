@@ -8,10 +8,18 @@ Use this when:
 - You need snapshot or acceptance test patterns
 
 Skip this file if:
-- You need general Swift Testing patterns (`@Test`, `#expect`). Use the `swift-testing-expert` skill.
 - You need architecture layer details. Use `architecture-layers.md`.
+- You need the reasoning behind a boundary. Use `design-principles.md`.
+
+> **Scope note.** The sections that are genuinely *architecture-coupled* — testing through the
+> public API, extracting a protocol boundary, contract specs, and acceptance tests through the
+> Composition Root — are the ones this skill owns, because each one is a design decision wearing a
+> test's clothes. The rest (double taxonomy, DSL craft, snapshot mechanics, TDD process, Swift
+> Testing syntax) is planned to move to a dedicated testing skill; until that exists, it stays here
+> so this file remains self-sufficient.
 
 Jump to:
+- [How much to test at which level](#how-much-to-test-at-which-level)
 - [Test Through the Public API](#0-test-through-the-public-api-no-testable-import)
 - [Unit Tests](#1-unit-tests)
 - [Extracting a Protocol Boundary](#extracting-a-protocol-boundary)
@@ -23,6 +31,40 @@ Jump to:
 - [Acceptance Tests](#5-acceptance-tests)
 - [Generic Async Test Spy](#generic-async-test-spy-loaderspy)
 - [Cross-Cutting Patterns](#cross-cutting-patterns)
+
+---
+
+## How much to test at which level
+
+The five layers below are not equal. The distribution is deliberate:
+
+| Level | Volume | What it covers | Why not more |
+|---|---|---|---|
+| **Unit** | The overwhelming majority | Every edge case, every error course | Fast enough to run several times a minute |
+| **Integration** | Some | The **happy path** of real components collaborating | Edge cases grow *exponentially* with the number of participants — and you cannot force most errors with real infrastructure |
+| **Snapshot** | A few per visual state | Rendering, light/dark, large content sizes | Slower; catches regressions no unit test can see |
+| **Acceptance** | One per BDD scenario | The composed app, launch and state transitions | The most valuable per test, the most expensive to keep passing |
+| **UI (XCUITest)** | Ideally none | — | ~10s *per test*, stateful across launches, and it forces test code into the production target |
+
+Two rules that follow:
+
+- **Test edge cases in isolation; test only the happy path in integration.** Once each component's
+  failure modes are proven at the unit level, integrating them only needs to prove they connect.
+- **Test the least amount of detail at the highest level.** The more detail a high-level test
+  asserts, the more fragile and slow it becomes. Details belong in unit tests.
+
+And one rule specific to high-level tests:
+
+> **Replace only infrastructure — never business logic.** Stub the HTTP client and point the store
+> at `/dev/null`; do not substitute a use case, presenter or policy. That is what preserves the
+> confidence that you are testing your real application.
+
+> **Why this codebase has no XCUITest target.** It had one — with launch arguments, a
+> `connectivity` `UserDefault`, and a `DebuggingSceneDelegate` — and deleted it. The in-process
+> acceptance tests below replaced 3 UI tests taking ~30s with 5 integration tests taking ~0.2s,
+> covered a use case the UI tests could not reach (cache validation on backgrounding), asserted
+> *content* rather than mere existence of cells, and let every seam that had been opened for
+> testing become private again. See [§5](#5-acceptance-tests).
 
 ---
 
@@ -56,7 +98,19 @@ Do **not** widen the test's reach with `@testable`. Instead, make the behavior o
 
 **Same-target tests** (acceptance tests that live in the app target alongside `SceneDelegate`) don't need `import` at all, but the rule still holds in spirit: assert through the composed public seams — the injected `SceneDelegate` initializer and the rendered view — never private state.
 
-> Guardrail: if a test only compiles with `@testable`, treat it as a missing public seam, not a reason to keep `@testable`.
+### The one exception: the Composition Root
+
+The rule exists to stop tests coupling to a module's internals, so that refactoring internals does
+not break tests. **A root module has no external clients**, so there is no contract to rot:
+
+- No other module references the Composition Root, so its types never need to be `public`.
+- Declaring them `public` purely so a test can reach them would be inventing an API nobody uses.
+
+So if the root lives in its own target, `@testable import App` is the correct tool there — and
+*only* there. In every feature module, a test that needs `@testable` is still a missing public
+seam. See `composition-root.md`.
+
+> Guardrail: outside the Composition Root, if a test only compiles with `@testable`, treat it as a missing public seam, not a reason to keep `@testable`.
 
 ---
 
@@ -93,7 +147,108 @@ class CacheFeedUseCaseTests: XCTestCase {
 }
 ```
 
-**Swift Testing delta**: `struct` suites get a fresh instance per test, but `addTeardownBlock`/`trackForMemoryLeaks` is XCTest-only with no direct equivalent. For `@Test`/`#expect` syntax, defer to the `swift-testing-expert` skill.
+### Swift Testing delta
+
+Most of this translates mechanically: `XCTestCase` → a `struct` or `final class` suite (a fresh
+instance per test either way), `setUp`/`tearDown` → `init`/`deinit`, `XCTAssertEqual` → `#expect`,
+`XCTUnwrap` → `try #require`, `XCTestExpectation` → `confirmation`, the `samples.enumerated()`
+loop → a parameterized `@Test(arguments:)`, and `file:`/`line:` propagation in helpers →
+a defaulted `SourceLocation` parameter forwarded to `#expect(..., sourceLocation:)`.
+
+Two things do **not** translate mechanically:
+
+- **Tests run in parallel by default.** Anything that shares state across tests — a store URL, an
+  on-disk artifact, a registered `URLProtocol` stub — needs `.serialized` on the suite, or it will
+  flake in ways the XCTest version never did. (Randomized-order discipline already prepared you
+  for this; parallelism just makes it mandatory.)
+- **`addTeardownBlock` has no direct equivalent**, so `trackForMemoryLeaks` must be rebuilt — see
+  below.
+
+### `trackForMemoryLeaks` in Swift Testing
+
+The mechanism is a **test-scoping trait** (swift-evolution ST-0007, Swift 6.1). `provideScope`
+wraps the test body, so it can assert *after* the body's locals have been released — which is
+exactly what `addTeardownBlock` gave you. A task-local carries the per-test collector, so the
+`trackForMemoryLeaks` call site stays as short as the XCTest one.
+
+```swift
+import Testing
+import Foundation
+
+private final class TrackedInstances: @unchecked Sendable {
+    private struct Entry { weak var instance: AnyObject?; let location: SourceLocation }
+    private let lock = NSLock()
+    private var entries = [Entry]()
+
+    func track(_ instance: AnyObject, _ location: SourceLocation) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append(Entry(instance: instance, location: location))
+    }
+
+    func verify() {
+        lock.lock(); defer { lock.unlock() }
+        for entry in entries where entry.instance != nil {
+            Issue.record("Instance should have been deallocated. Potential memory leak.",
+                         sourceLocation: entry.location)
+        }
+    }
+}
+
+private enum LeakTracking {
+    @TaskLocal static var current: TrackedInstances?
+}
+
+struct TrackLeaksTrait: TestTrait, SuiteTrait, TestScoping {
+    var isRecursive: Bool { true }      // applies to each test, so failures attribute per test
+
+    func provideScope(for test: Test,
+                      testCase: Test.Case?,
+                      performing function: @Sendable () async throws -> Void) async throws {
+        let tracked = TrackedInstances()
+        try await LeakTracking.$current.withValue(tracked) { try await function() }
+        tracked.verify()                // the body's locals are released by now
+    }
+}
+
+extension Trait where Self == TrackLeaksTrait {
+    static var trackLeaks: Self { Self() }
+}
+
+func trackForMemoryLeaks(_ instance: AnyObject,
+                         sourceLocation: SourceLocation = #_sourceLocation) {
+    LeakTracking.current?.track(instance, sourceLocation)
+}
+```
+
+Declare it once on the suite; `makeSUT` is otherwise unchanged:
+
+```swift
+@Suite(.trackLeaks)
+struct CacheFeedUseCaseTests {
+    @Test func save_requestsCacheDeletion() { let (sut, store) = makeSUT(); ... }
+
+    private func makeSUT(currentDate: @escaping () -> Date = Date.init)
+        -> (sut: LocalFeedLoader, store: FeedStoreSpy) {
+        let store = FeedStoreSpy()
+        let sut = LocalFeedLoader(store: store, currentDate: currentDate)
+        trackForMemoryLeaks(store)
+        trackForMemoryLeaks(sut)
+        return (sut, store)
+    }
+}
+```
+
+Two details that matter:
+
+- **`isRecursive` is what gives per-test attribution.** Without it, a suite-level trait wraps the
+  whole suite and every leak is reported against the *suite* rather than the test that caused it.
+- **`#_sourceLocation`** is the Swift Testing replacement for the `#filePath`/`#line` pair, so
+  failures still point at the `trackForMemoryLeaks` call inside `makeSUT`.
+
+> Verified on Swift 6.3.3 / Xcode 26.6: reports two issues for a deliberate `SUT ⇄ Collaborator`
+> retain cycle, and passes once the back-reference is made `weak`. Confirm it fails before you
+> trust it — a leak detector that has never gone red is exactly the vacuous-green trap this file
+> warns about elsewhere.
 
 ### Spy with `receivedMessages` enum
 
@@ -630,7 +785,7 @@ func test_localizedStrings_haveKeysAndValuesForAllSupportedLocalizations() {
 
 ## Guardrails
 
-- Test through the public API — plain `import`, never `@testable import`; a test that needs `@testable` is a missing public seam, not a reason to keep it
+- Test through the public API — plain `import`, never `@testable import` (the Composition Root is the one exception); a test that needs `@testable` in a feature module is a missing public seam, not a reason to keep it
 - Use `makeSUT()` in every test class — never share a `sut` across tests
 - Use enum-based message recording in spies — not boolean flags
 - Use `trackForMemoryLeaks` in XCTest for all reference-type SUTs and collaborators
@@ -639,7 +794,7 @@ func test_localizedStrings_haveKeysAndValuesForAllSupportedLocalizations() {
 
 ## Verification
 
-- [ ] No `@testable import` anywhere in the test targets — every assertion goes through the public API
+- [ ] No `@testable import` in any feature-module test target — every assertion goes through the public API (the Composition Root's own tests may use it)
 - [ ] Every test class has a `makeSUT()` factory method
 - [ ] Every `makeSUT()` in XCTest calls `trackForMemoryLeaks` on reference types
 - [ ] Spy collaborators use `enum ReceivedMessage` for method recording

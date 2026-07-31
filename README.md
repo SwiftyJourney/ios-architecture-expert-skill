@@ -34,6 +34,17 @@ npx skills add SwiftyJourney/ios-architecture-expert-skill
 
 ## What the Skill Covers
 
+### Design Principles
+
+The reasoning an agent needs to diagnose unfamiliar code, not just replicate a shape:
+
+- Three kinds of logic — application-specific, application-agnostic, framework
+- Dependency Inversion anatomy, and Dependency Rejection (compose instead of inject)
+- Command–Query Separation as a detector for a bloated use case
+- Interface Segregation, Composite Reuse, Liskov as the enabler of shared contract specs
+- Coincidental duplication vs DRY, Data Transfer Model Representations
+- Bottleneck-for-change analysis; make invalid states unrepresentable
+
 ### Architecture Layers
 
 - **Feature Layer**: Domain models (`struct`, `Hashable`, `Sendable`) and use-case protocols
@@ -43,8 +54,20 @@ npx skills add SwiftyJourney/ios-architecture-expert-skill
 - **UI Layer**: UIKit (`DiffableDataSource`, `CellController`) and SwiftUI (`@Observable`) patterns
 - **Composition Layer**: Composition Root, UI composers, adapters, virtual proxies
 
+Plus module organization: onion architecture, horizontal vs vertical slicing, and how physically
+separated your modules should actually be.
+
+### Presentation Patterns
+
+- **MVC** as *many tiny MVCs* per screen — and diagnosing a controller by dependency count, not lines
+- **MVVM** — Model-View-Binder, stateful vs stateless view models, value conversion, cross-platform view models
+- **MVP** — abstract view protocols owned by the presentation layer, Supervising Controller, presentation adapters
+- Why memory-management policy belongs to the composer (and therefore why `WeakRefVirtualProxy` exists)
+- Choosing between them — and the honest answer that it depends on the problem you have
+
 ### Composition Patterns
 
+- **Adapter / Decorator / Composite / Interception / Null Object** — when each applies, and when a language construct already does the job
 - `FeedService` — `@MainActor` orchestrator with lazy init, Scheduler, and fallback strategy
 - `FeedUIComposer` — Static factory wiring presenter->adapter->view chains
 - `LoadResourcePresentationAdapter` — Generic async loader with `Task.immediate` and cancellation
@@ -55,12 +78,15 @@ npx skills add SwiftyJourney/ios-architecture-expert-skill
 
 ### Testing Strategy
 
+- How much to test at which level — and why this codebase has no XCUITest target
+- Testing through the public API, and the one place `@testable` is legitimate
 - Unit tests with `makeSUT()` factory and spy collaborators
 - Generic async test spy (`LoaderSpy`) with `AsyncThrowingStream`
 - Specification pattern for shared store contract tests
 - Integration tests with real CoreData stack
 - Snapshot tests (light/dark mode + accessibility sizes)
 - Acceptance tests with full DI container
+- The Swift Testing delta — including a verified `trackForMemoryLeaks` built on a test-scoping trait
 
 ### Concurrency at Architecture Boundaries
 
@@ -74,16 +100,20 @@ npx skills add SwiftyJourney/ios-architecture-expert-skill
 ## Skill File Structure
 
 ```
-SKILL.md                                 # Hub + diagnostic table + gotchas + reference router
-references/
-├── architecture-layers.md               # Layer-by-layer patterns with code
-├── composition-root.md                  # FeedService, Scheduler, fallback, SceneDelegate
-├── adapters-and-proxies.md              # Adapters, proxies, pagination, cell lifecycle
-├── concurrency-at-boundaries.md         # Concurrency at boundaries + async migration playbook
-├── testing-strategy.md                  # 5-layer test strategy + generic async spy
-├── feature-implementation-workflow.md   # Step-by-step feature building + duplicate-then-generalize
-└── spm-project-structure.md             # SPM module layout + Swift 6 settings + CI
-evals/                                   # Trigger eval queries + output-quality test cases
+skills/ios-architecture-expert/          # the skill — this is what ships
+├── SKILL.md                             # Hub + diagnostic table + gotchas + reference router
+└── references/
+    ├── design-principles.md             # Symptom→principle table; the reasoning behind the patterns
+    ├── architecture-layers.md           # Layer-by-layer patterns with code
+    ├── presentation-patterns.md         # MVC / MVVM / MVP, and choosing between them
+    ├── composition-root.md              # What the root is, lifetimes, FeedService, Scheduler, fallback
+    ├── adapters-and-proxies.md          # Adapter, proxy, composite, decorator, interception, pagination
+    ├── concurrency-at-boundaries.md     # Why boundaries stay sync + async migration playbook
+    ├── testing-strategy.md              # 5-layer test strategy + generic async spy + Swift Testing delta
+    ├── feature-implementation-workflow.md  # Feature building, spy-first/protocol-last, legacy extraction
+    └── spm-project-structure.md         # Onion, slicing, SPM module layout + Swift 6 settings + CI
+evals/                                   # Trigger eval queries + output-quality test cases (repo-only)
+.claude-plugin/                          # plugin + marketplace manifests (repo-only)
 ```
 
 ## Related Skills

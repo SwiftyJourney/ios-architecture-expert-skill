@@ -12,6 +12,9 @@ Skip this file if:
 - You need Composition Root wiring. Use `composition-root.md`.
 
 Jump to:
+- [Onion architecture](#onion-architecture)
+- [Horizontal vs vertical slicing](#horizontal-vs-vertical-slicing)
+- [How physically separated should modules be?](#how-physically-separated-should-modules-be)
 - [Module Layout](#module-layout)
 - [Package.swift Example](#packageswift-example)
 - [Build Settings](#build-settings--swift-6-strict-concurrency)
@@ -20,6 +23,94 @@ Jump to:
 - [CI/CD](#cicd-github-actions-example)
 
 > The case study itself ships as **two Xcode projects + a workspace**, not a Swift package. This file is the recommended SPM-equivalent of that layout — use it when you want package-based modularity; the boundary rules are identical either way.
+
+---
+
+## Onion architecture
+
+```
+             ┌──────────────── frameworks ────────────────┐
+             │  ┌──────── infrastructure adapters ──────┐ │
+             │  │  ┌──── use cases + presentation ────┐ │ │
+             │  │  │   domain models + boundaries     │ │ │   ← no outgoing arrows
+             │  │  └──────────────────────────────────┘ │ │
+             │  └───────────────────────────────────────┘ │
+             └───────────────────────────────────────────┘
+```
+
+Two rules, and only two:
+
+1. **Inner layers know nothing about outer layers.** The centre — domain models and service
+   interfaces — has **no outgoing arrows at all**.
+2. **An outer layer knows only its *direct* inner layer.** And sibling slices (API, Cache,
+   Presentation) never know about each other.
+
+The dividing line that matters in practice is **platform-agnostic vs platform-specific**:
+everything above infrastructure is reusable on macOS, watchOS, tvOS and iPadOS. `URLSession` and
+CoreData are Apple-only, so pushing them into an infrastructure ring is what would let the core
+run somewhere else entirely.
+
+**The test is "peeling the onion":** you should be able to take a whole vertical slice — the cache
+layer plus its CoreData infrastructure — off the diagram, and replace or delete it without
+touching anything else. If no arrow snaps, the boundaries are real. If one does, they were
+decoration.
+
+---
+
+## Horizontal vs vertical slicing
+
+| | Slices by | Produces |
+|---|---|---|
+| **Horizontal** | Layer | `Feed`, `FeedAPI`, `FeedCache`, `FeedPresentation`, `FeediOS` |
+| **Vertical** | Feature | `Feed` framework, `Login` framework, `Comments` framework |
+
+They compose: slice **vertically by feature**, and inside each feature slice **horizontally by
+layer**. The app target composes the vertical slices; the Composition Root is the only place that
+imports everything, which is exactly how the modules stay agnostic of each other and still combine.
+
+The layout in this file is one feature sliced horizontally. Add a second feature and it becomes a
+vertical slice beside it — with its own API, cache and UI targets, and no arrow between the two.
+
+> Separate modules are what let separate teams work in parallel: a feed team and a comments team
+> never touch the same files, and the root composes both.
+
+---
+
+## How physically separated should modules be?
+
+Folders give you **virtual** modularity — the compiler will not stop you crossing a boundary, so
+it takes discipline. Physical separation forces `import` statements, and the compiler enforces the
+boundary for you. That enforcement has a price, so escalate only when you need it:
+
+| Level | Setup | Use when | Cost |
+|---|---|---|---|
+| **A** | One project, one app target, folders only | Small apps, prototypes, throwaway projects | No enforcement; tests must run through the simulator; slower builds |
+| **B** | One project, one framework target per feature | You want features physically separated, layers virtually | Target maintenance |
+| **C** | One project per feature, composed by the app target | Larger apps, multiple teams | Workspace + scheme management |
+| **D** | Separate repositories | You genuinely share code **across** repos | Highest — needs SwiftPM/Carthage/submodules, version pinning, cross-repo releases |
+
+Guidance:
+
+- **Start simple; split when needed.** Breaking into physically separated modules increases the
+  maintenance you and your team carry. Do it when you have the problem it solves.
+- **Keep everything in one repository when you can.** A monorepo is by far the easiest way to
+  maintain a modular app under source control — and it is what makes cross-module refactors cheap.
+- **The decision is driven by team structure**, not by taste: feature teams, remote teams and
+  release cadence all influence it.
+- Before splitting a target to speed up the test loop, try **controlling which tests run per
+  scheme** — that is often enough.
+
+An interfaces-only shared module is legitimate, but note its cost: every change to it forces a
+recompile and redeploy of every module that depends on it. **A shared module with many incoming
+arrows is a bottleneck**; prefer letting the Composition Root do the sharing, since nothing
+depends on it.
+
+> Duplicating a small *interface* across two modules is often cheaper than coupling them. Two
+> modules each declaring the one-method `HTTPClient` they need is Interface Segregation, not
+> duplication — and it lets one of them grow a `POST` without affecting the other. Share the
+> *implementation* instead: put the concrete client in an infrastructure module that depends on
+> both protocols. Look at the arrow direction — infrastructure depends on the API modules, never
+> the reverse.
 
 ---
 
@@ -141,7 +232,7 @@ let package = Package(
 )
 ```
 
-> Test targets depend on the modules under test and `import` them plainly — **never** `@testable import`. Tests exercise each module through its public API only; if a test can't reach what it needs, expose a public seam rather than widening access. See [testing-strategy.md](testing-strategy.md#0-test-through-the-public-api-no-testable-import).
+> Test targets depend on the modules under test and `import` them plainly — **never** `@testable import`. Tests exercise each module through its public API only; if a test can't reach what it needs, expose a public seam rather than widening access. The App target is the exception: nothing depends on the Composition Root, so its types need not be `public` and its own tests may use `@testable`. See [testing-strategy.md](testing-strategy.md#0-test-through-the-public-api-no-testable-import).
 
 ---
 
@@ -168,7 +259,28 @@ For projects not yet on Swift 6, enable strict concurrency incrementally:
 
 Enable on **all targets** — Feature, API, Cache, CacheInfra, iOS, and App. Inconsistent settings across modules hide data-race issues at module boundaries.
 
-> Compiling the core package (Feature/API/Cache/Presentation) for **both macOS and iOS** is the cheapest enforcement of zero UIKit imports — a second platform fails to build the moment a UI framework leaks into a framework-free layer.
+### Multi-platform support as boundary enforcement
+
+Compiling the core (Feature/API/Cache/Presentation) for **both macOS and iOS** is the cheapest
+enforcement of zero UIKit imports there is: the second platform fails to build the moment a UI
+framework leaks into a framework-free layer. It is a compiler-enforced version of the "delete the
+import and see if it still compiles" check.
+
+Making it work:
+
+- If a target's code has no platform dependency, list **all** the platforms it supports — and do
+  the same for its **test targets**, not just the production ones.
+- **Run the tests on every platform you support.** Behaviour that is correct on one platform is
+  occasionally wrong on another, and you only find that by running there.
+- The moment a platform-specific component (a `UIViewController` subclass) lands in a shared
+  target, that target loses macOS support instantly. That component belongs in the platform-specific
+  module.
+- **CI needs one scheme per platform** — you cannot put an iOS-only test target in a scheme that
+  also builds for macOS. Share `CI_macOS` and `CI_iOS` schemes and run both, so
+  platform-independent tests run everywhere and platform-specific tests run only where they apply.
+
+The cost is honest: more platforms means slower CI and higher build-server bills. Take it when the
+boundary enforcement (or genuine multi-platform reach) is worth it.
 
 ---
 
@@ -258,6 +370,9 @@ End-to-end API tests get their own CI-only scheme so they never run in the fast 
 - Do not skip `FeatureCacheInfra` — CoreData implementations belong in infrastructure, not in the cache layer
 - Do not mix test types in the same target — keep unit, integration, snapshot, and acceptance tests separate
 - Do not use `Bundle(for:)` in SPM targets — use `Bundle.module`
+- Do not split into physically separated modules before you have the problem it solves — start with folders and escalate
+- Do not create a shared module that every other module depends on — let the Composition Root do the sharing
+- Do not let a feature module depend on the Composition Root — that is a circular dependency waiting to happen
 
 ## Verification
 
