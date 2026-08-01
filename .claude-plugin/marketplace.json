@@ -1,6 +1,6 @@
 {
   "name": "ios-architecture-expert-skill",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "owner": {
     "name": "SwiftyJourney",
     "email": "jfdoradotr@icloud.com"
@@ -13,7 +13,7 @@
       "name": "ios-architecture-expert",
       "description": "Expert guidance for building modular, testable iOS/Swift apps following a clean architecture methodology. Protocol-oriented design, composition root, generic presenters, and modern Swift concurrency.",
       "repository": "https://github.com/SwiftyJourney/ios-architecture-expert-skill",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "author": {
         "name": "SwiftyJourney",
         "email": "jfdoradotr@icloud.com"

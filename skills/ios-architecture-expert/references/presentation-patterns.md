@@ -101,6 +101,11 @@ Diagnose by **counting what it coordinates**:
    pagination, sharing, animation, analytics events? A type that "seems fine now" but accumulates
    those is already not sustainable.
 
+**Make the count concrete.** Write out every responsibility as its own bullet before and after the
+split — the case study's cell controller went from **seven responsibilities to two**, and the
+before/after list is what makes the refactor arguable to a reviewer. A line count would have shown
+nothing; the controller was already under 100 lines and "pretty clean".
+
 **The fix is more controllers, not less code.** MVC's original goal was many small triads sharing
 responsibility. Splitting into tiny MVCs is the fix; extracting one giant helper is not.
 
@@ -246,6 +251,29 @@ public struct ResourceLoadingViewModel {   // data only — extensible without b
 2. **Supervising Controller** — the view controller conforms to the abstract view protocol and
    translates `UIView` events into presenter events. **Prefer this one.**
 
+> "Nothing changes in the model or presentation layers, but the view layer becomes easier to develop
+> and maintain as we don't need to subclass custom UIKit views."
+
+### The MVP variation gallery
+
+MVP has more variations than any other pattern here, and they differ only in *how the view reaches
+the presenter*. Pick by how much decoupling the situation earns:
+
+| Variation | View → presenter | Use when |
+|---|---|---|
+| Plain MVP | Direct reference to the concrete presenter | Smallest graph; couples the view to a concrete type |
+| Closure | `var onLoad: (() -> Void)?` | One event, no naming needed — "we just need the same type information, void to void" |
+| **Presenter-input protocol** | View calls a protocol **owned by the presentation module** | The common form; keeps the presenter agnostic of the UI framework |
+| **Presentation adapter (unidirectional)** | View → adapter → domain service → presenter → view | **Preferred here.** The presenter loses all state management and never talks to domain services |
+| View-delegate protocol | Protocol owned by the **view** layer; the composition adapter conforms | Also valid — the presenter stays agnostic either way |
+
+The adapter variation is what makes MVP unidirectional and is why this codebase has
+`LoadResourcePresentationAdapter`: the presenter shrinks to pure translation, and the view layer
+never holds a presenter at all.
+
+> **Read the diagram with the composer deleted.** What remains — view protocol, presenter, view
+> model — is the architecture. The rest is wiring.
+
 ### The two-way channel and its cost
 
 Unlike MVC, the view talks to the presenter directly. That two-way channel introduces a potential
@@ -347,9 +375,11 @@ Customer-facing bundled content is presentation, not UI:
 
 | Pattern | Who creates the string |
 |---|---|
-| **MVC** | Controller (or, badly, the view) |
-| **MVVM** | The view model |
-| **MVP** | The presenter |
+| **MVC** | A presentation component, or the Controller/View |
+| **MVVM** | The ViewModel |
+| **MVP** | The Presenter |
+
+> Localized strings should only appear in an MVC *Model* if that model is itself a view model.
 
 For content that does not vary, a `static` property on the presenter is enough
 (`FeedPresenter.title`). **The view must not read it directly** — the composer assigns it, so the

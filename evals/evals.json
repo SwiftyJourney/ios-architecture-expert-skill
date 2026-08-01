@@ -66,6 +66,34 @@
         "The calendar/date arithmetic is flagged: it is not recalculated inline per call with a force-unwrap, and day-based math goes through Calendar rather than a fixed 24*60*60 interval",
         "The answer identifies that the invalidation behaviour is an implicit/undocumented requirement and says the specification should be clarified, not just that the code should be moved around"
       ]
+    },
+    {
+      "id": "singleton-taxonomy-and-extraction",
+      "prompt": "Our codebase has `AnalyticsManager.shared` (a `static let` with a private init), `APIClient.shared` (a `static var` so tests can swap it), and `URLSession.shared` used directly inside three view controllers. A reviewer just told me \"singletons are bad, remove them all\". Is that right? What should I actually do here, and in what order? Show the refactor for the API client.",
+      "expected_output": "An answer that refuses the blanket rule and distinguishes the three cases: AnalyticsManager is a genuine Singleton and may be fine; APIClient.shared as a `static var` is mutable global state rather than a singleton and is the real problem; URLSession.shared is a shared instance whose issue is that view controllers reach for it directly. The fix is not deleting singletons but removing direct access -- inject an abstraction and move creation to the composition root -- shown as an incremental, test-backed sequence.",
+      "assertions": [
+        "The answer explicitly rejects or qualifies the blanket 'remove all singletons' instruction rather than complying with it",
+        "It distinguishes at least the `static var` case as mutable global state that is NOT the singleton pattern, and explains why a `var` changes the nature of the thing",
+        "It identifies that the core problem with the view controllers is reaching for a globally-located instance (mixing locating a dependency with using it), not the existence of a shared instance per se",
+        "The proposed refactor injects an abstraction (protocol or closure) that the consuming module owns, rather than injecting the concrete client type",
+        "Creation/wiring of the concrete instance is moved to a single composition site, and the answer states that the instance may still be shared or even remain a singleton there because nothing downstream depends on that fact",
+        "The refactor is presented as incremental steps that keep tests passing, not a single rewrite",
+        "The answer does not claim that a singleton is inherently untestable, and does not recommend making a `static let` into a `static var` as the fix"
+      ]
+    },
+    {
+      "id": "connectivity-check-before-request",
+      "prompt": "Before I load the feed I want to check whether the user has internet, and show an 'offline' screen if not, so I don't waste a request. I was going to use NWPathMonitor and cache the status in a shared ConnectivityService that the view model reads. Write the code for this.",
+      "expected_output": "A refusal of the pre-flight approach with Apple's reasoning: there is no reliable way to determine connectivity ahead of a request and the result must not be cached, because the network can change between the check and the request. The recommended shape is to attempt the request and handle the result, configure the session (waitsForConnectivity, timeoutIntervalForResource) and use a cache fallback for the offline experience; reachability is used only to diagnose or explain a failure after the fact.",
+      "assertions": [
+        "The answer does NOT deliver a pre-flight connectivity gate as requested, and explicitly explains that guessing connectivity ahead of a request is unreliable and must not be cached",
+        "It names the race condition: the network state can change between the check and the request",
+        "It recommends attempting the request and handling the failure, rather than branching on a connectivity flag",
+        "It mentions URLSessionConfiguration options for waiting behaviour (waitsForConnectivity, and/or timeoutIntervalForResource) instead of manual reachability polling",
+        "It positions reachability/NWPathMonitor as a post-failure diagnostic or UI hint (e.g. 'looks like you are offline', auto-retry when connectivity returns), not as a gate",
+        "The offline experience is achieved through a cache/fallback composition rather than a connectivity branch inside the view model",
+        "No shared mutable ConnectivityService is introduced that components read directly"
+      ]
     }
   ]
 }

@@ -113,6 +113,12 @@ public protocol FeedImageDataStore {
 
 **Rules**: Models own no behavior. Protocols define single-responsibility boundaries. Each protocol maps to one use case.
 
+> **Infrastructure interfaces should be dumb.** `HTTPClient` and `FeedStore` exist only to fulfil
+> commands sent by a controller type through the boundary — "fetch something from the cache",
+> "download an image from a remote URL". No implementation of them ever contains a rule like "only
+> insert if the timestamp is less than seven days old". Imagine how bad it would be if changing a
+> database driver forced you to rewrite and re-migrate every business rule.
+
 **Guardrails**:
 - Do not make use-case protocols generic over their error type (`associatedtype Error`) — the constraint infects every consumer. The case study tried it and reverted within minutes; use a plain `Error` (or a locally-scoped typed `throws`).
 - Do not add a production conformance (e.g. `Equatable` on a result/boundary enum) solely to satisfy a test assertion — pattern-match in an `expect(_:toCompleteWith:)` helper instead.

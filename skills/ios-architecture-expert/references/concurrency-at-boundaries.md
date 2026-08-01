@@ -22,6 +22,7 @@ Jump to:
 - [Cancellation Handling in Adapters](#cancellation-handling-in-adapters)
 - [Swift 6 Strict Concurrency — Architectural Impact](#swift-6-strict-concurrency--architectural-impact)
 - [Migration Playbook: Closures/Combine → async/await](#migration-playbook-closurescombine--asyncawait)
+- [The limit: sync protocol requirements bypass actor isolation](#the-limit-sync-protocol-requirements-bypass-actor-isolation)
 - [Swift 6 / UIKit Interop Gotchas](#swift-6--uikit-interop-gotchas)
 
 ---
@@ -315,12 +316,40 @@ Annotate PUBLIC view protocols `@MainActor` explicitly even when the target buil
 
 ## Migration Playbook: Closures/Combine → async/await
 
-Order matters — from the case study's migration history:
+### The three ordered steps
 
-1. **Strictness first, APIs later.** Enable `SWIFT_STRICT_CONCURRENCY = complete` per target, inside-out (core framework → UI framework → app), and fix ALL warnings BEFORE changing any API. This forces `Sendable`/`@MainActor` onto existing code, so later API changes are purely structural.
-2. **Leaf infrastructure protocols first.** Migrate `HTTPClient`, then the store — both have native async APIs to land on.
-3. **Composition per feature, in two beats.** Beat 1: add the async functions in the Composition Root but keep the old adapter alive behind a bridge (historically `Deferred { Future { Task { … } } }`) — tests stay green. Beat 2: flip the adapter signature to `() async throws -> T` and delete the bridge.
-4. **Flip the language mode last.** Delete the helpers, set `SWIFT_VERSION = 6.0`, and THEN annotate public view protocols `@MainActor` explicitly.
+1. **Turn on Complete concurrency checking everywhere and fix every warning — changing no APIs.**
+2. **Replace completion closures, dispatch queues and Combine with async/await** where needed.
+3. **Flip the Swift 6 language mode last.**
+
+Swift 6 goes last deliberately: it is strict enough to generate both compile-time *and* runtime
+errors, so it is far easier to reach a clean Complete-checking build first and only then turn it on.
+
+**Migrate one target at a time**, taking a production target *together with its test target* as the
+unit. Enabling checking across every target at once "generates thousands of warnings and build
+errors — it can be extremely overwhelming." Work outward from the core framework, then the UI
+framework, then the app, then the secondary test targets (end-to-end, integration), building the
+whole workspace scheme before each commit.
+
+Guiding constraints worth stating up front, because they shape every later decision:
+
+- The solution must stay **fully testable**, and the tests must stay **just as fast and reliable**.
+- **Preserve existing behaviour.** For an existing codebase it is safer to keep behaviour identical
+  while changing technology.
+- **Don't leak asynchrony everywhere** — handle concurrency in the Composition Root; keep components
+  synchronous where it makes sense.
+- No blocking in an async context; no unsafe/unchecked escapes outside a temporary bridge.
+
+### Two build settings that decide a lot
+
+| Setting | Values | How to choose |
+|---|---|---|
+| `SWIFT_STRICT_CONCURRENCY` | minimal / targeted / **complete** | Go to `complete` per target — that is step 1 |
+| `SWIFT_DEFAULT_ACTOR_ISOLATION` | `nonisolated` / `MainActor` | `MainActor` is a good default for UI-heavy modules; `nonisolated` for mixed/non-UI ones |
+
+New Xcode projects default to MainActor isolation. **For an existing app being migrated, do not flip
+the app target wholesale** — "it will be a big change in behavior for our existing app, and things
+can break unexpectedly." Annotate types one by one instead.
 
 ### Deprecation bridge for a protocol boundary (5 steps)
 
@@ -330,9 +359,80 @@ Order matters — from the case study's migration history:
 4. Implement the native async method in the infra type (`URLSession.data(from:)`, `context.perform`) — the default implementation is now dead code.
 5. Delete the deprecated requirement and the bridge.
 
+The deprecation warnings *are* the roadmap: they show you precisely which call sites remain, and
+"only a warning left in the temporary helper" is how you know every client has been migrated.
+
 `nonisolated(unsafe)` may appear ONLY inside this temporary bridge — it must be gone by step 5.
 
 **Naming during coexistence**: prefix the NEW type (`AsyncLoadResourcePresentationAdapter`); give it the canonical name when the old one is deleted. Never rename the old one.
+
+### Preserving timing, not just logic
+
+Swift Concurrency can preserve *logical* behaviour while changing *timing* behaviour, and tests will
+catch the difference. Two specifics:
+
+- **Combine's `Future` runs its body immediately; `Task` does not.** Use `Task.immediate` where the
+  old code executed eagerly — this is what keeps a synchronous `didStartLoading` synchronous.
+- **A `Task` is not an `AnyCancellable`.** Cancellation on `deinit` was automatic with Combine; with
+  tasks you must cancel manually, and you must check `Task.isCancelled` yourself after each `await`.
+
+### Delete what the compiler now proves
+
+A test that "completes on a background queue to ensure our production code is thread safe" is
+obsolete once Complete checking is on. **Do not write tests for invariants the compiler enforces at
+compile time** — delete them. Likewise, migrating to `URLSession.data(from:)` makes some invalid
+`(data, response, error)` combinations structurally impossible; delete those assertions instead of
+contorting a stub to produce a state that can no longer exist.
+
+---
+
+## The limit: sync protocol requirements bypass actor isolation
+
+**This is the most important thing to know about Swift 6 in a layered app, and it is not obvious.**
+
+Actor isolation is enforced at `await` boundaries. A **synchronous** protocol requirement has no
+suspension point, so calling it through the protocol — existential or generic — can execute
+immediately on the caller's thread. Protocol witness tables do not carry isolation.
+
+```swift
+@MainActor final class InMemoryFeedStore: FeedStore {   // isolated…
+    func retrieve() throws -> CachedFeed? { ... }        // …but this is a sync requirement
+}
+
+// FeedStore is NOT @MainActor. From a @concurrent context:
+let cache = try store.retrieve()   // runs off the main actor, mutating main-actor state
+```
+
+**No warning. No compile error. A real data race.** That is intended behaviour, not a bug — and it
+means a `@MainActor` annotation on the implementation buys you nothing when the protocol is
+reached synchronously.
+
+Three fixes, in the order you should consider them:
+
+| Fix | When it works | Cost |
+|---|---|---|
+| **Scheduler in the Composition Root** ✅ | Always | The root hops to the right executor before invoking the sync API — concurrency stays confined to the root |
+| Make the requirements `async` | You control the protocol | Restores the `await` boundary, but leaks asynchrony up the call chain |
+| Isolate the protocol to an actor | *All* implementations genuinely share that isolation | Wrong for most infrastructure |
+
+**Do not isolate a store protocol.** CoreData has its own threading model, SQLite has another — "it's
+not possible to define an actor isolation that will work well for all implementations, because
+that's an implementation detail. And we don't want to leak implementation details in protocols."
+
+**Do isolate view protocols.** `ResourceView`, `ResourceLoadingView` and `ResourceErrorView` are
+`@MainActor` precisely because every implementation is UI code, and you want the compiler to stop
+you sending messages to the UI off the main thread. Isolating a protocol cascades to its consumers —
+the presenter using it becomes `@MainActor` too.
+
+> It is a case-by-case decision. In another codebase a view protocol might *not* be a good candidate
+> — for instance if you decorate it with types that shouldn't be main-actor isolated.
+
+**The takeaway:** Swift Concurrency prevents data races *only if you annotate correctly*. It will
+not save you from bad design or logical errors. Where the compiler cannot check something — such as
+an isolated type conforming to a non-isolated sync protocol — **write a test for it.** In the case
+study, exactly that test caught a race the Swift 6 compiler accepted silently.
+
+---
 
 ---
 
@@ -354,6 +454,10 @@ Order matters — from the case study's migration history:
 - Do not capture `self` in `@Sendable` closures when `self` is `@MainActor` — capture specific `Sendable` properties instead (e.g., `[store]`, `[httpClient]`)
 - Do not make a domain or store boundary `async` because one implementation happens to be — keep it synchronous and inject the execution context at the composition site
 - Do not make components thread-safe individually when the Composition Root can own threading as a cross-cutting concern — but if you take that route, route *every* call through the same scheduler
+- Do not assume a `@MainActor` type stays isolated when reached through a non-isolated **synchronous** protocol requirement — the compiler will not warn you; hop executors in the Composition Root
+- Do not isolate an infrastructure protocol to an actor — threading is an implementation detail and must not leak into the boundary
+- Do not enable Complete checking on every target at once, and do not flip an existing app target to MainActor-by-default wholesale
+- Do not keep tests for invariants the compiler now enforces, or for states the new API cannot represent
 - Defer general concurrency questions (task groups, async sequences, actor reentrancy) to the `swift-language-expert` skill (`references/concurrency-and-errors.md`)
 
 ## Verification

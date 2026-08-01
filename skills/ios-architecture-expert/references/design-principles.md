@@ -26,6 +26,8 @@ Jump to:
 - [Duplicate before you abstract](#duplicate-before-you-abstract)
 - [Deterministic core, side effects at the boundary](#deterministic-core-side-effects-at-the-boundary)
 - [Make invalid states unrepresentable](#make-invalid-states-unrepresentable)
+- [Functional Core, Imperative Shell](#functional-core-imperative-shell)
+- [Low coupling, high cohesion](#low-coupling-high-cohesion--the-litmus-test)
 - [Access control as a decoupling tool](#access-control-as-a-decoupling-tool)
 - [What modularity actually buys](#what-modularity-actually-buys)
 
@@ -164,6 +166,25 @@ you don't have compile-time guarantees? You write tests.** Make that trade knowi
 | Has identity | Yes — a customer is *this* customer | No — a policy is a policy |
 | Two with equal fields | Different things | The same thing |
 | Implies | An instance, possibly mutable state | A `struct`, or a static namespace |
+
+```swift
+// Value Object — compared by its values. Two of these with equal fields ARE the same money.
+struct Money {
+    let amount: Decimal
+    let currency: Currency
+}
+
+// Entity — compared by identity. Two of these with the SAME id are identical
+// even when their values differ.
+struct Money {
+    let id: MoneyID
+    let amount: Decimal
+    let currency: Currency
+}
+```
+
+Both can hold business rules; the distinction is only whether identity exists. A Value Object is
+often called a "Value Type" or "just data".
 
 A **policy has no identity and no state**, so it should not be instantiable:
 
@@ -305,6 +326,19 @@ before optimizing it**; if you have no measured problem, optimize for maintainab
 
 ---
 
+## Low coupling, high cohesion — the litmus test
+
+Aim for **low coupling between modules and high cohesion within one**. The test is a single question:
+
+> **"Can I refactor or add new features to this module without touching any files of the other
+> module?"** Aim for a yes.
+
+And the failure signal is behavioural rather than structural:
+
+> **The design fights change.** When developers "think twice, three, four times before making such a
+> costly change", the design is not facilitating change. That hesitation is the measurement — act on
+> it early, before the bottleneck sets.
+
 ## Bottleneck-for-change analysis
 
 Module-level dependency diagrams lie by omission — they are "surveying the landscape from an
@@ -350,6 +384,29 @@ you may start generic — but that is a prediction, and predictions are where sp
 comes from.
 
 ---
+
+## Functional Core, Imperative Shell
+
+The name for the shape the previous sections keep producing:
+
+```
+        ┌──────── Imperative Shell ────────┐
+        │  stateful components, side        │
+        │  effects, frameworks, UI, I/O     │
+        │   ┌──── Functional Core ────┐     │
+        │   │  side-effect-free       │     │
+        │   │  business logic         │     │
+        │   └─────────────────────────┘     │
+        └───────────────────────────────────┘
+```
+
+The payoff is stated as a property, not a preference: **because there are no side effects in the
+Functional Core, it is deterministic** — the same input always produces the same output. That is what
+makes it trivial to build, maintain and test, and it is why `FeedCachePolicy` takes a `Date` rather
+than a `() -> Date`.
+
+The shell is allowed to be messy — threads, disks, sockets. Containing the mess is the job; removing
+it is impossible.
 
 ## Deterministic core, side effects at the boundary
 

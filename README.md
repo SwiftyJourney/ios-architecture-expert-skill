@@ -65,6 +65,20 @@ separated your modules should actually be.
 - Why memory-management policy belongs to the composer (and therefore why `WeakRefVirtualProxy` exists)
 - Choosing between them — and the honest answer that it depends on the problem you have
 
+### Dependency Management
+
+- The **three kinds of "singleton"** — the GoF pattern, a shared instance, and mutable global state
+- The **four levels of dependency evolution**, and why most codebases stall at level 2
+- Constructor / property / method injection, and Constrained Construction
+- Composer rules, Pure DI vs DI containers, and the Service Locator anti-pattern
+
+### Infrastructure
+
+- **Never pre-flight a connectivity check** — configure the session and handle the result
+- `URLSession` delegate retention, and the representable-states technique
+- CoreData details: binary storage, bundles, `/dev/null` test stores
+- Logging, `assertionFailure` vs `print`, and graceful degradation with a Null Object
+
 ### Composition Patterns
 
 - **Adapter / Decorator / Composite / Interception / Null Object** — when each applies, and when a language construct already does the job
@@ -104,6 +118,8 @@ skills/ios-architecture-expert/          # the skill — this is what ships
 ├── SKILL.md                             # Hub + diagnostic table + gotchas + reference router
 └── references/
     ├── design-principles.md             # Symptom→principle table; the reasoning behind the patterns
+    ├── dependency-management.md         # Singleton taxonomy, DI techniques, composer rules, lifetimes
+    ├── infrastructure-and-networking.md # Connectivity, URLSession config, CoreData details, logging
     ├── architecture-layers.md           # Layer-by-layer patterns with code
     ├── presentation-patterns.md         # MVC / MVVM / MVP, and choosing between them
     ├── composition-root.md              # What the root is, lifetimes, FeedService, Scheduler, fallback

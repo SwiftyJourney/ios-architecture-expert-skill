@@ -30,7 +30,7 @@ When this skill is active, follow these rules **strictly**:
 4. **Presentation logic is framework-agnostic** — presenters output view models (structs). No `UIImage`, `UIColor`, or SwiftUI types in the presentation layer.
 5. **All dependency wiring happens in the Composition Root** — the app target (or a dedicated `CompositionRoot` module). Feature modules never create their own dependencies.
 6. **Tests drive the design** — one test class per use case, named by behavior (`CacheFeedUseCaseTests`, not `LocalFeedLoaderTests`). Use `makeSUT()` factory in every test class.
-6b. **Test only the public API — no `@testable import`.** Test targets use a plain `import Feed`, never `@testable import Feed`. Tests exercise a module exclusively through its public surface; they never reach for `internal`/`private` members. If a behavior can't be observed publicly, that's a design signal — expose it through the module's public API (a protocol boundary, a return value, an injected collaborator/spy), not by widening access for the test. Same-target tests (e.g. acceptance tests in the app target) still assert through the composed public seams, not private state. **One exception:** the Composition Root has no external clients, so its types never need to be `public` and `@testable import App` is correct there — and only there.
+6b. **Test only the public API — no `@testable import`.** Test targets use a plain `import Feed`, never `@testable import Feed`. Tests exercise a module exclusively through its public surface; they never reach for `internal`/`private` members. If a behavior can't be observed publicly, that's a design signal — expose it through the module's public API (a protocol boundary, a return value, an injected collaborator/spy), not by widening access for the test. Same-target tests (e.g. acceptance tests in the app target) still assert through the composed public seams, not private state. **One exception:** the Composition Root has no external clients, so its types never need to be `public` and `@testable import App` is correct there — and only there. (For reference, the source codebase is looser than this rule: it uses `@testable` in 5 places — 2 in the root and 3 in snapshot tests reaching internal view-model initializers. This skill deliberately takes the stricter line.)
 7. **Use SPM multi-target packages** for module separation — `Feed` (Foundation), `FeediOS` (UIKit), `App` (composition).
 8. **Prefer async/await over closures/Combine** for async operations. Use `Task.immediate` for synchronous-first execution in adapters.
 9. **Match the project's existing test framework; default to Swift Testing for greenfield suites.** The reference patterns in `testing-strategy.md` are XCTest, as in the source codebase. Translating is mostly mechanical — the one real gap is `trackForMemoryLeaks`/`addTeardownBlock`, which is XCTest-only; the Swift Testing equivalent is a test-scoping trait (ST-0007, Swift 6.1). Also note Swift Testing runs tests **in parallel by default**, so suites sharing a store URL or on-disk artifacts need `.serialized`.
@@ -48,6 +48,11 @@ When this skill is active, follow these rules **strictly**:
 | View controller coordinates too much | Count its views/models/state, not its lines | Split into tiny MVCs; move creation to a composer | `references/presentation-patterns.md` |
 | Presentation logic duplicated across controllers | Value transformation in the controller | Extract a platform-agnostic view model or presenter | `references/presentation-patterns.md` |
 | Protocol with exactly one implementation | Is there a second strategy? | Delete it; compose a closure in the root | `references/design-principles.md` |
+| "Should this be a singleton?" | Which of the three kinds it actually is | Inject it; let the root decide the lifetime | `references/dependency-management.md` |
+| Every feature depends on one shared API client | Which of the four levels you're on | Invert: each module declares the interface it needs | `references/dependency-management.md` |
+| Checking connectivity before a request | There is no reliable check | Attempt the request; configure `waitsForConnectivity` | `references/infrastructure-and-networking.md` |
+| `@MainActor` type races despite Swift 6 | Is it reached via a **sync** protocol requirement? | Hop executors in the root via `Scheduler` | `references/concurrency-at-boundaries.md` |
+| Storyboard "forces" property injection | iOS version | `instantiateViewController(identifier:creator:)` | `references/dependency-management.md` |
 | Use case both returns data and mutates state | Command–Query Separation | Split into a query and a command use case | `references/design-principles.md` |
 | Conformance with empty method bodies | Interface Segregation | Split the protocol, or compose optional capabilities in a struct | `references/design-principles.md` |
 | Domain model has `Codable`/`@Model`/`CodingKeys` | Framework detail in an agnostic type | Add a private mirror type in the infrastructure | `references/architecture-layers.md` |
@@ -77,6 +82,10 @@ When this skill is active, follow these rules **strictly**:
 - `adjustsFontForContentSizeCategory` defaults to **`false`** — `UIFont.preferredFont(forTextStyle:)` alone does not give you Dynamic Type.
 - An `NSKeyValueObservation` must be **retained** or the observation is removed immediately; release it deliberately (e.g. in `didEndDisplaying`).
 - Diffable data sources request cells **eagerly**, ahead of display, based on `estimatedRowHeight` — set a realistic estimate, and move expensive work from `cellForRowAt` to `willDisplay`.
+- **A `@MainActor` type reached through a non-isolated *synchronous* protocol requirement is not isolated** — protocol witness tables don't carry isolation and there is no suspension point, so it runs on the caller's thread with no warning and no error. Hop executors in the Composition Root.
+- `URLSession` holds a **strong** reference to its delegate until you invalidate the session — `invalidateAndCancel()` or you leak until the app exits.
+- Setting anything on a `URLSessionConfiguration` **after** creating the session has no effect.
+- `Task` is not `AnyCancellable`: it does not cancel on `deinit`, and `Task.isCancelled` must be checked manually. Combine's `Future` runs eagerly, `Task` does not — use `Task.immediate` to preserve that timing.
 
 ---
 
@@ -148,7 +157,9 @@ Starting a new feature? Follow this path:
 ## Guardrails
 
 - Do not create concrete types inside feature modules — all instantiation belongs in the Composition Root
-- Do not use singletons — `lazy var` in `FeedService` achieves deferred init without global state
+- Do not reach for `.shared` from a component — inject it and let the Composition Root own the lifetime (`lazy var` in `FeedService` gives a shared instance without global state). Note "singleton" means three different things — see `dependency-management.md`
+- Do not reference a DI container, coordinator or router from a feature module — that is the Service Locator anti-pattern
+- Do not check connectivity before making a request
 - Do not add `@MainActor` to domain types or store protocols — only presentation, adapters, and composition
 - Do not use `@unchecked Sendable` — redesign the type as a value type or use `@MainActor`
 - Do not embed cache policy logic inside the loader — keep it as a separate type
@@ -188,7 +199,11 @@ When implementing or reviewing architecture:
 Open the smallest reference that matches the question:
 
 - **Why, before how**
-  - [design-principles.md](references/design-principles.md) — symptom→principle table, CQS, ISP, dependency inversion & rejection, DTOs, invalid states
+  - [design-principles.md](references/design-principles.md) — symptom→principle table, CQS, ISP, dependency inversion & rejection, DTOs, invalid states, Functional Core/Imperative Shell
+- **Dependencies & Ownership**
+  - [dependency-management.md](references/dependency-management.md) — singleton taxonomy, the four levels, injection techniques, composer rules, Pure DI vs containers, lifetimes
+- **Infrastructure**
+  - [infrastructure-and-networking.md](references/infrastructure-and-networking.md) — connectivity (never pre-flight), URLSession configuration & delegate lifetime, representable states, CoreData details, logging & fallbacks
 - **Architecture & Layers**
   - [architecture-layers.md](references/architecture-layers.md) — layer boundaries, domain models, protocols, do-you-need-persistence
   - [spm-project-structure.md](references/spm-project-structure.md) — onion, horizontal/vertical slicing, module layout, Package.swift, CI

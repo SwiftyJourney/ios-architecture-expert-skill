@@ -28,8 +28,20 @@ Jump to:
 
 ## What the Composition Root is
 
-> The **root module**: the one place that imports every other module and composes them. **No other
-> module references it.**
+> "When you write loosely coupled code, you create many classes to create an application. It can be
+> tempting to compose these classes at many different locations in order to create small subsystems,
+> but that limits your ability to intercept those systems to modify their behavior. Instead, you
+> should compose classes in one single area of your application… **The Composition Root acts as a
+> third party that connects consumers with their services.** The longer you defer the decision on how
+> to connect classes, the more you keep your options open."
+> — Seemann & van Deursen, *Dependency Injection: Principles, Practices, and Patterns*
+
+Put it **as close to the application's entry point as possible**. Traditionally that is `main()`; on
+Apple platforms it is `UIApplicationDelegate` / `@main` and, since iOS 13, `UISceneDelegate` — so
+those types *are* the Composition Root.
+
+Operationally: the one place that imports every other module and composes them. **No other module
+references it.**
 
 Three consequences follow from "no other module references it", and they are all load-bearing:
 
@@ -74,9 +86,17 @@ dependency.
 
 ### DI containers
 
-Same rule, stronger: **no component outside the Composition Root may reference a container.**
+Composing dependencies by hand — as this codebase does — is **Pure DI**, and it is a legitimate end
+state, not a stepping stone. If you delegate instead to a **DI Container**, the rule is absolute:
+
+> **Accessing a DI Container outside the Composition Root results in the Service Locator
+> anti-pattern.**
+
 Otherwise you couple every feature to the container and, transitively, to whatever the container
 depends on.
+
+> Singleton taxonomy, the four levels of dependency evolution, injection techniques and Composer
+> rules live in [dependency-management.md](dependency-management.md).
 
 ### Coordinators, flows and routers
 

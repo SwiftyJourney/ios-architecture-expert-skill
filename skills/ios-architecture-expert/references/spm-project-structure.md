@@ -82,12 +82,14 @@ Folders give you **virtual** modularity — the compiler will not stop you cross
 it takes discipline. Physical separation forces `import` statements, and the compiler enforces the
 boundary for you. That enforcement has a price, so escalate only when you need it:
 
-| Level | Setup | Use when | Cost |
+| # | Setup | Use when | Cost |
 |---|---|---|---|
-| **A** | One project, one app target, folders only | Small apps, prototypes, throwaway projects | No enforcement; tests must run through the simulator; slower builds |
-| **B** | One project, one framework target per feature | You want features physically separated, layers virtually | Target maintenance |
-| **C** | One project per feature, composed by the app target | Larger apps, multiple teams | Workspace + scheme management |
-| **D** | Separate repositories | You genuinely share code **across** repos | Highest — needs SwiftPM/Carthage/submodules, version pinning, cross-repo releases |
+| **1** | **Monolith** — one project, one app target, folders only | Small apps, prototypes, code you'll discard | No compiler enforcement; tests run through the simulator, so slower |
+| **2** | **Feature vertical slicing** — one framework target per feature, one project | You want features physically separated, layers virtually | Target maintenance |
+| **3** | **Horizontal slicing** — a framework target per layer (`FeedAPI`, `FeedCache`…) | You want compiler-enforced layer boundaries | Every extraction forces `import`s and linking |
+| **4** | **Horizontal within vertical** — each feature has its own layered stack | Several features, each non-trivial, features don't know each other | The most targets to maintain |
+| **5** | **One project per feature**, combined in an app workspace | Larger apps, multiple teams, still one repo | Workspace + scheme management |
+| **6** | **Packages / separate repositories** | You genuinely share modules **across repos** | Highest — SwiftPM/CocoaPods/Carthage/submodules, version pinning, cross-repo releases |
 
 Guidance:
 
