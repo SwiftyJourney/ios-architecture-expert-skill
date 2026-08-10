@@ -25,17 +25,17 @@ description: >-
 When this skill is active, follow these rules **strictly**:
 
 1. **Feature modules have zero UIKit/SwiftUI imports** — only Foundation. Domain models, use cases, presenters, and API/cache logic never depend on a UI framework.
-2. **Define a boundary at every layer transition — protocol *or* closure.** A layer never references a concrete type from another layer. Use a protocol when there are genuinely multiple strategies (`FeedStore`, `HTTPClient`, `ResourceView`, `FeedCache`); use a plain composed closure (`() async throws -> Resource`) when there is one — see rule 11.
+2. **Define a boundary at every layer transition — protocol *or* closure.** A layer never references a concrete type from another layer. Use a protocol when there are genuinely multiple strategies (`FeedStore`, `HTTPClient`, `ResourceView`, `FeedCache`); use a plain composed closure (`() async throws -> Resource`) when there is one — see rule 12.
 3. **Domain models are value types** — `struct`, `Hashable`, `Sendable`. No classes for models.
 4. **Presentation logic is framework-agnostic** — presenters output view models (structs). No `UIImage`, `UIColor`, or SwiftUI types in the presentation layer.
 5. **All dependency wiring happens in the Composition Root** — the app target (or a dedicated `CompositionRoot` module). Feature modules never create their own dependencies.
 6. **Tests drive the design** — one test class per use case, named by behavior (`CacheFeedUseCaseTests`, not `LocalFeedLoaderTests`). Use `makeSUT()` factory in every test class.
-6b. **Test only the public API — no `@testable import`.** Test targets use a plain `import Feed`, never `@testable import Feed`. Tests exercise a module exclusively through its public surface; they never reach for `internal`/`private` members. If a behavior can't be observed publicly, that's a design signal — expose it through the module's public API (a protocol boundary, a return value, an injected collaborator/spy), not by widening access for the test. Same-target tests (e.g. acceptance tests in the app target) still assert through the composed public seams, not private state. **One exception:** the Composition Root has no external clients, so its types never need to be `public` and `@testable import App` is correct there — and only there. (For reference, the source codebase is looser than this rule: it uses `@testable` in 5 places — 2 in the root and 3 in snapshot tests reaching internal view-model initializers. This skill deliberately takes the stricter line.)
-7. **Use SPM multi-target packages** for module separation — `Feed` (Foundation), `FeediOS` (UIKit), `App` (composition).
-8. **Prefer async/await over closures/Combine** for async operations. Use `Task.immediate` for synchronous-first execution in adapters.
-9. **Match the project's existing test framework; default to Swift Testing for greenfield suites.** The reference patterns in `testing-strategy.md` are XCTest, as in the source codebase. Translating is mostly mechanical — the one real gap is `trackForMemoryLeaks`/`addTeardownBlock`, which is XCTest-only; the Swift Testing equivalent is a test-scoping trait (ST-0007, Swift 6.1). Also note Swift Testing runs tests **in parallel by default**, so suites sharing a store URL or on-disk artifacts need `.serialized`.
-10. **Mark shared mutable state with `@MainActor`** — presenters, adapters, view controllers, and composition code run on the main actor.
-11. **Do not add a protocol boundary that has only one implementation** and no second strategy in sight — compose a closure in the Composition Root instead. Boundaries exist to select between strategies.
+7. **Test only the public API — no `@testable import` outside the Composition Root.** Test targets use a plain `import Feed`; a behavior that can't be observed publicly is a missing public seam (a boundary, a return value, an injected collaborator), never a reason to widen the test's access. This is deliberately stricter than the source codebase, which uses `@testable` in a handful of places — the full argument and the Composition Root exception live in `testability-and-seams.md`.
+8. **Use SPM multi-target packages** for module separation — `Feed` (Foundation), `FeediOS` (UIKit), `App` (composition).
+9. **Prefer async/await over closures/Combine** for async operations. Use `Task.immediate` for synchronous-first execution in adapters where the deployment target allows it (iOS 26+; plain `Task` + observable-state tests is the documented fallback — see `concurrency-at-boundaries.md`).
+10. **Match the project's existing test framework; default to Swift Testing for greenfield suites.** For test doubles, test design, deterministic async testing, Swift Testing syntax and XCTest migration, defer to the **`swift-testing-expert`** skill. This skill keeps only the places where a testing decision is a *design* decision — see `testability-and-seams.md`. Two things that bite regardless: `trackForMemoryLeaks`/`addTeardownBlock` is XCTest-only (the Swift Testing equivalent is a test-scoping trait, ST-0007), and Swift Testing runs tests **in parallel by default**, so suites sharing a store URL or on-disk artifacts need `.serialized`.
+11. **Mark shared mutable state with `@MainActor`** — presenters, adapters, view controllers, and composition code run on the main actor.
+12. **Do not add a protocol boundary that has only one implementation** and no second strategy in sight — compose a closure in the Composition Root instead. Boundaries exist to select between strategies.
 
 ---
 
@@ -60,22 +60,23 @@ When this skill is active, follow these rules **strictly**:
 | Retain cycle between presenter and view | Proxy wiring | Add `WeakRefVirtualProxy` | `references/adapters-and-proxies.md` |
 | CoreData crashes on launch | Fallback strategy | Add `InMemoryFeedStore` fallback | `references/composition-root.md` |
 | Duplicate network requests on refresh | `isLoading` guard | Use `LoadResourcePresentationAdapter` | `references/adapters-and-proxies.md` |
-| Test requires real infrastructure | Protocol boundary | Extract protocol at boundary | `references/testing-strategy.md` |
+| Test requires real infrastructure | Protocol boundary | Extract protocol at boundary | `references/testability-and-seams.md` |
 | Sendable warning at composition boundary | Closure annotations | Add `@Sendable` + `@MainActor` | `references/concurrency-at-boundaries.md` |
 | Pagination won't load next page | `loadMore` closure | Verify recursive composition in `FeedViewAdapter` | `references/composition-root.md` |
 | Cache validation doesn't run | `Task.immediate` usage | Use fire-and-forget with `Task.immediate` | `references/concurrency-at-boundaries.md` |
 | Debug/test-only code in the production composition | `#if DEBUG` isolation | Move it to a `#if DEBUG` `SceneDelegate` subclass | `references/composition-root.md` |
+| SwiftUI app has no obvious place to wire dependencies | Views constructing their own dependencies | Compose in `@main App`/Scene, inject via init or environment | `references/swiftui-composition.md` |
 
 ---
 
 ## Gotchas
 
-- `Task.immediate` requires a Swift 6.2-era toolchain/recent deployment target (the case study targets iOS 26). On older targets, fall back to plain `Task` and handle the synchronous `didStartLoading` requirement explicitly.
+- `Task.immediate` (SE-0472, Swift 6.2) has runtime availability aligned to iOS 26/macOS 26 with **no back-deployment**. On earlier targets, fall back to plain `Task` — the work is then enqueued, not started synchronously, so handle the synchronous `didStartLoading` requirement explicitly and make tests await observable state.
 - `CoreDataFeedStore(storeURL: URL(fileURLWithPath: "/dev/null"), contextQueue: .main)` is effectively in-memory AND synchronous — it's what makes acceptance tests deterministic without sleeps.
 - Capture `[store]`, never `[self]`, in `@Sendable` closures created inside the `@MainActor` service — capturing self drags MainActor isolation into the closure (compile error under Swift 6).
-- `UIWindow(frame:)` is deprecated on iOS 26; tests build a dummy scene via `(UIWindowScene.self as NSObject.Type).init() as? UIWindowScene` (no public initializer exists).
+- `UIWindow(frame:)` and `UIWindow()` are deprecated on iOS 26 ("Use init(windowScene:)") — deprecated, **not obsoleted**: they still compile with a warning, which is acceptable in test targets. The `(UIWindowScene.self as NSObject.Type).init() as? UIWindowScene` dummy-scene trick works (no public initializer exists) but is an **unsanctioned runtime bypass** that may break in any release — see `testability-and-seams.md`.
 - `didEndDisplaying(cell:forRowAt:)` fires for OLD cells after a data-source update — never cancel by indexing the NEW model; cancel through a `[IndexPath: CellController]` registry populated in `cellForRowAt`.
-- Diffable data sources don't reflow on Dynamic Type changes — reload when `preferredContentSizeCategory` changes; use `applySnapshotUsingReloadData` guarded by an `itemIdentifiers` equality check.
+- Diffable data sources don't reflow on Dynamic Type changes — reload when the content size category changes via `registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { ... }` (`traitCollectionDidChange(_:)` is deprecated since iOS 17); use `applySnapshotUsingReloadData` guarded by an `itemIdentifiers` equality check.
 - `Thread.isMainThread` is not "on the main queue" (the main thread can run other queues) — prefer `@MainActor` isolation over runtime checks.
 - Load `NSManagedObjectModel` once and cache it statically — loading it twice registers duplicate `NSEntityDescription`s claiming the same `NSManagedObject` subclasses (undefined behavior).
 - A diffable data source has **no sections at all** until the first snapshot is applied — guard `numberOfSections` in test DSLs, or they crash before the first render.
@@ -181,16 +182,16 @@ When implementing or reviewing architecture:
 1. Build with `SWIFT_STRICT_CONCURRENCY = complete` — zero warnings
 2. No UIKit/SwiftUI imports in Feature/API/Cache modules
 3. All protocol boundaries have corresponding test doubles
-3b. Test targets `import` modules plainly — grep for `@testable` returns nothing; every assertion goes through the public API
-4. `makeSUT()` exists in every test class
-5. CoreData store has `InMemoryFeedStore` fallback in Composition Root
-6. Run Thread Sanitizer (`-enableThreadSanitizer YES`) — zero data races
-7. `WeakRefVirtualProxy` wraps all view references in UIKit composition (or `@Observable` in SwiftUI)
-8. Pagination `loadMore` is `nil` for the last page
-9. Every protocol boundary has, or is credibly about to have, more than one implementation
-10. No conformance in the codebase has an empty method body
-11. No feature module imports the Composition Root
-12. Deleting `import UIKit`/`import SwiftUI` from every presentation file still compiles
+4. Test targets `import` modules plainly — grep for `@testable` returns nothing; every assertion goes through the public API
+5. `makeSUT()` exists in every test class
+6. Store initialization failure is handled deliberately (in-memory fallback or Null Object — a logged product decision)
+7. Run Thread Sanitizer (`-enableThreadSanitizer YES`) — zero data races
+8. `WeakRefVirtualProxy` wraps all view references in UIKit composition (or `@Observable` in SwiftUI)
+9. Pagination `loadMore` is `nil` for the last page
+10. Every protocol boundary has, or is credibly about to have, more than one implementation
+11. No conformance in the codebase has an empty method body
+12. No feature module imports the Composition Root
+13. Deleting `import UIKit`/`import SwiftUI` from every presentation file still compiles
 
 ---
 
@@ -209,12 +210,15 @@ Open the smallest reference that matches the question:
   - [spm-project-structure.md](references/spm-project-structure.md) — onion, horizontal/vertical slicing, module layout, Package.swift, CI
 - **Presentation**
   - [presentation-patterns.md](references/presentation-patterns.md) — MVC/MVVM/MVP, diagnosing a bloated controller, where memory policy lives
+- **SwiftUI**
+  - [swiftui-composition.md](references/swiftui-composition.md) — `@main App` composition root, environment DI, NavigationStack routing at the root, @Observable presenters, acceptance seams
 - **Composition & Wiring**
   - [composition-root.md](references/composition-root.md) — what the root is, lifetimes, FeedService, Scheduler, fallback, logging
   - [adapters-and-proxies.md](references/adapters-and-proxies.md) — adapter, proxy, composite, decorator, interception, pagination wiring
 - **Concurrency in Architecture**
   - [concurrency-at-boundaries.md](references/concurrency-at-boundaries.md) — why boundaries stay synchronous, Scheduler, @Sendable, Task.immediate, cancellation
 - **Testing**
-  - [testing-strategy.md](references/testing-strategy.md) — boundaries as testability seams, contract specs, integration/snapshot/acceptance layers, and the Swift Testing delta
+  - [testability-and-seams.md](references/testability-and-seams.md) — testing decisions that are design decisions: public-API testing, extracting boundaries, contract specs, acceptance tests through the root
+  - Everything else about testing → the **`swift-testing-expert`** skill
 - **Workflow**
   - [feature-implementation-workflow.md](references/feature-implementation-workflow.md) — step-by-step feature building, spy-first/protocol-last, legacy-code extraction

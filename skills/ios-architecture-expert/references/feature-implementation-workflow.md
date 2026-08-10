@@ -8,7 +8,7 @@ Use this when:
 Skip this file if:
 - You need detailed code for a specific layer. Use `architecture-layers.md`.
 - You need Composition Root wiring details. Use `composition-root.md`.
-- You need testing patterns in depth. Use `testing-strategy.md`.
+- You need test doubles, DSLs or async-test technique. Use the `swift-testing-expert` skill.
 
 Jump to:
 - [TDD rhythm](#tdd-rhythm-applies-to-every-step-below)
@@ -162,7 +162,7 @@ public enum FeedEndpoint {
 }
 
 // Feed/API/FeedItemsMapper.swift
-public final class FeedItemsMapper {
+public enum FeedItemsMapper {
     private struct Root: Decodable { ... }
     public enum Error: Swift.Error { case invalidData }
 
@@ -173,7 +173,7 @@ public final class FeedItemsMapper {
 Checklist:
 - [ ] Endpoint is an `enum` with associated values
 - [ ] Endpoint computes URL from a `baseURL` parameter
-- [ ] Mapper is `static` — no instance state
+- [ ] Mapper is a caseless `enum` with `static` methods — no instance state
 - [ ] Decodable types are `private` (never leaked)
 - [ ] Validates HTTP status code before decoding
 - [ ] Tests: happy path, invalid data, non-2xx status codes
@@ -240,7 +240,7 @@ Checklist:
 - [ ] Presenter is generic over `<Resource, View>`
 - [ ] Presenter is `@MainActor`
 - [ ] View models are plain structs
-- [ ] Error strings use `NSLocalizedString` with `Bundle(for:)`
+- [ ] Error strings use `NSLocalizedString` with `Bundle.module` (SPM targets; `Bundle(for:)` only in plain framework targets)
 - [ ] No UIKit/SwiftUI imports in presenter
 - [ ] Feature-specific presenters use `static func map` (pure functions)
 - [ ] Tests: verify all three state transitions (loading, success, error)
@@ -314,7 +314,7 @@ func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() throws {
 Checklist:
 - [ ] Test each BDD scenario from Step 1
 - [ ] Use `HTTPClientStub.online/.offline` for deterministic network
-- [ ] `launch` is **synchronous** — pass the real `CoreDataFeedStore.empty` (`/dev/null`, `.main` context); carry one store instance across simulated launches for cache persistence (see `testing-strategy.md` §5)
+- [ ] `launch` is **synchronous** — pass the real `CoreDataFeedStore.empty` (`/dev/null`, `.main` context); carry one store instance across simulated launches for cache persistence (see `testability-and-seams.md` §5)
 - [ ] Inject via `SceneDelegate` convenience init
 - [ ] DSL helper methods for readable assertions; `withWaitingChanges` (not `Task.sleep`) for parallel side effects
 
@@ -350,7 +350,7 @@ Checklist:
 - [ ] Verify `@MainActor` is on: presenters, adapters, view controllers, composition code, view protocols
 - [ ] Verify `@MainActor` is NOT on: domain models, use-case protocols, store protocols, cache policy
 - [ ] Verify `@Sendable` on all closures crossing actor boundaries (especially `loadMore`, `Scheduler.schedule`)
-- [ ] Verify `Task.immediate` is used in `LoadResourcePresentationAdapter` (not bare `Task`)
+- [ ] Verify `Task.immediate` is used in `LoadResourcePresentationAdapter` (not bare `Task`) on iOS 26+ targets; earlier targets use plain `Task` with observable-state tests (`concurrency-at-boundaries.md`)
 - [ ] Verify `Task.isCancelled` is checked after every `await` in adapter code
 
 ---

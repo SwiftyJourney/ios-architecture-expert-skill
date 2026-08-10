@@ -21,6 +21,7 @@ Jump to:
 - [Persistence details](#persistence-details)
 - [Optimize in the infrastructure, not the service layer](#optimize-in-the-infrastructure-not-the-service-layer)
 - [Logging and graceful degradation](#logging-and-graceful-degradation)
+- [Auth as a cross-cutting concern](#auth-as-a-cross-cutting-concern--the-decorator-youll-actually-write)
 
 ---
 
@@ -58,14 +59,18 @@ Everything you would have wanted a reachability check for is a `URLSessionConfig
 **Set them before creating the session — later changes to the configuration have no effect on an
 existing session.**
 
-| Setting | Since | What it does |
+| Setting | Default | What it does |
 |---|---|---|
-| `waitsForConnectivity` | iOS 11 | Instead of failing immediately, the task waits for connectivity to become available. Complex rules run behind the scenes |
-| `timeoutIntervalForResource` | — | How long it is allowed to wait. Default is **7 days** — set something sane (e.g. 600) if you enable waiting |
-| `allowsCellularAccess` | — | Also settable per `URLRequest`. Note a reachability flag alone never guarantees traffic won't go over cellular |
-| `allowsExpensiveNetworkAccess` | iOS 13 | Interfaces the system considers expensive (cellular, personal hotspot) |
-| `allowsConstrainedNetworkAccess` | iOS 13 | Respects the user's **Low Data Mode** |
+| `waitsForConnectivity` | `false` | Instead of failing immediately, the task waits for connectivity to become available. **Ignored by background sessions** — they always wait |
+| `timeoutIntervalForRequest` | **60 s** | Idle timeout, not a total cap — the timer resets whenever data arrives |
+| `timeoutIntervalForResource` | **7 days** | How long the whole transfer (including any waiting) is allowed to take — set something sane (e.g. 600) if you enable waiting |
+| `allowsCellularAccess` | `true` | Also settable per `URLRequest`. Note a reachability flag alone never guarantees traffic won't go over cellular |
+| `allowsExpensiveNetworkAccess` | `true` | Interfaces the system considers expensive (cellular, personal hotspot) |
+| `allowsConstrainedNetworkAccess` | `true` | Respects the user's **Low Data Mode** |
+| `multipathServiceType` | `.none` | Multipath TCP — requires an entitlement, and is unavailable on macOS/watchOS/tvOS |
 | `.ephemeral` | — | Nothing written to disk — no cache, credentials or session data. Use it when you own your caching strategy, and in tests |
+
+These defaults were verified against the iOS 26.5 SDK documentation and headers.
 
 Two behaviours worth knowing:
 
@@ -84,9 +89,6 @@ func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSes
 
 When a task does fail for one of these reasons, `networkUnavailableReason` on the error tells you
 *which* (`.expensive`, `.constrained`) so you can retry, downgrade the request, or explain.
-
-> Verify the exact availability and defaults against current Apple documentation before relying on
-> them in production — this table reflects the course's cited guidance, not a live doc read.
 
 ---
 
@@ -257,6 +259,54 @@ The costs are real and worth stating:
 
 > **Temporary diagnostic logs are not committed.** Once a test proves the behaviour, the log is
 > noise. Keep permanent logs only for what you genuinely cannot test.
+
+---
+
+## Auth as a cross-cutting concern — the decorator you'll actually write
+
+Authentication is the interception pattern's most common production use: a decorator that signs
+every request and handles token expiry, composed once in the Composition Root
+(`adapters-and-proxies.md` covers the pattern itself). Signing needs headers, so it presumes a
+request-shaped client boundary (`perform(_: URLRequest)`) rather than the URL-only `get(from:)`:
+
+```swift
+protocol TokenProvider: Sendable {
+    func validToken() async throws -> String
+    func refreshedToken() async throws -> String
+}
+
+final class AuthenticatedHTTPClientDecorator: HTTPClient {
+    private let decoratee: HTTPClient
+    private let tokenProvider: TokenProvider
+
+    init(decoratee: HTTPClient, tokenProvider: TokenProvider) {
+        self.decoratee = decoratee
+        self.tokenProvider = tokenProvider
+    }
+
+    func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await decoratee.perform(
+            signed(request, with: try await tokenProvider.validToken()))
+        guard response.statusCode == 401 else { return (data, response) }
+
+        let freshToken = try await tokenProvider.refreshedToken()   // refresh once
+        return try await decoratee.perform(signed(request, with: freshToken))  // retry once
+    }
+
+    private func signed(_ request: URLRequest, with token: String) -> URLRequest {
+        var signed = request
+        signed.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        return signed
+    }
+}
+```
+
+Because the decorator implements the same `HTTPClient` boundary it wraps, services and use cases
+keep **zero** auth knowledge — the Composition Root decides which clients are authenticated.
+Single-flight token refresh belongs *inside* the `TokenProvider` (make it an actor), so ten
+concurrent 401s trigger exactly one refresh and the other nine await its result. Never retry more
+than once: a second 401 after a fresh token is a real auth failure, and looping on it hammers the
+backend and hides the bug.
 
 ---
 

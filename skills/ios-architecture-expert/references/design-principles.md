@@ -175,11 +175,10 @@ struct Money {
 }
 
 // Entity — compared by identity. Two of these with the SAME id are identical
-// even when their values differ.
-struct Money {
-    let id: MoneyID
-    let amount: Decimal
-    let currency: Currency
+// even when their values differ (a balance changes; the account is still the account).
+struct Account {
+    let id: AccountID
+    var balance: Money
 }
 ```
 

@@ -52,7 +52,9 @@ The reasoning an agent needs to diagnose unfamiliar code, not just replicate a s
 - **Cache Layer**: Store protocols, local models, cache policy objects
 - **Presentation Layer**: Generic `LoadResourcePresenter<Resource, View>`, framework-agnostic view models
 - **UI Layer**: UIKit (`DiffableDataSource`, `CellController`) and SwiftUI (`@Observable`) patterns
-- **Composition Layer**: Composition Root, UI composers, adapters, virtual proxies
+- **Composition Layer**: Composition Root, UI composers, adapters, virtual proxies — in both
+  dialects: UIKit (`SceneDelegate` + `FeedUIComposer`) and SwiftUI (`@main App` composer,
+  environment DI, `NavigationStack` routing owned by the root)
 
 Plus module organization: onion architecture, horizontal vs vertical slicing, and how physically
 separated your modules should actually be.
@@ -92,15 +94,14 @@ separated your modules should actually be.
 
 ### Testing Strategy
 
-- How much to test at which level — and why this codebase has no XCUITest target
-- Testing through the public API, and the one place `@testable` is legitimate
-- Unit tests with `makeSUT()` factory and spy collaborators
-- Generic async test spy (`LoaderSpy`) with `AsyncThrowingStream`
-- Specification pattern for shared store contract tests
-- Integration tests with real CoreData stack
-- Snapshot tests (light/dark mode + accessibility sizes)
-- Acceptance tests with full DI container
-- The Swift Testing delta — including a verified `trackForMemoryLeaks` built on a test-scoping trait
+Only the testing decisions that are *design* decisions live here (`testability-and-seams.md`):
+
+- Testing through the public API — no `@testable import`, and the one place it is legitimate (the Composition Root)
+- Extracting a boundary because a test demanded it — spy-first, protocol-last
+- Specification pattern — shared contract specs every store implementation must satisfy
+- In-process acceptance tests that exercise the real composition through the `SceneDelegate` seam
+
+Everything else about testing — test doubles, `makeSUT` and test design, deterministic async tests, Swift Testing syntax, XCTest migration — belongs to the [Swift Testing Expert](https://github.com/SwiftyJourney/swift-testing-expert-skill) skill.
 
 ### Concurrency at Architecture Boundaries
 
@@ -125,8 +126,9 @@ skills/ios-architecture-expert/          # the skill — this is what ships
     ├── composition-root.md              # What the root is, lifetimes, FeedService, Scheduler, fallback
     ├── adapters-and-proxies.md          # Adapter, proxy, composite, decorator, interception, pagination
     ├── concurrency-at-boundaries.md     # Why boundaries stay sync + async migration playbook
-    ├── testing-strategy.md              # 5-layer test strategy + generic async spy + Swift Testing delta
+    ├── testability-and-seams.md         # Testing decisions that are design decisions
     ├── feature-implementation-workflow.md  # Feature building, spy-first/protocol-last, legacy extraction
+    ├── swiftui-composition.md           # @main App root, environment DI, NavigationStack routing, @Observable
     └── spm-project-structure.md         # Onion, slicing, SPM module layout + Swift 6 settings + CI
 evals/                                   # Trigger eval queries + output-quality test cases (repo-only)
 .claude-plugin/                          # plugin + marketplace manifests (repo-only)
@@ -138,10 +140,11 @@ evals/                                   # Trigger eval queries + output-quality
 - [SwiftUI Expert](https://github.com/SwiftyJourney/swiftui-expert-skill) — SwiftUI view code: state, composition, performance, animations, accessibility
 - [SwiftUI ⇄ UIKit Interop](https://github.com/SwiftyJourney/swiftui-uikit-interop-skill) — Bridge SwiftUI and UIKit: hosting controllers, representables, data across the boundary
 - [Swift Language Expert](https://github.com/SwiftyJourney/swift-language-expert-skill) — Non-obvious Swift language & standard-library techniques
+- [Swift Testing Expert](https://github.com/SwiftyJourney/swift-testing-expert-skill) — Swift Testing syntax, XCTest migration, test doubles, deterministic async tests
 
 ## Credits
 
-Built on well-established clean architecture, TDD, and modular design practices from the iOS community. Code examples written for Swift 6 / iOS 18+.
+Built on well-established clean architecture, TDD, and modular design practices from the iOS community. Code examples verified against Swift 6.3 / Xcode 26 (some APIs — `Task.immediate`, `isolated deinit` for actors — need iOS 26-era availability; fallbacks are shown where they do).
 
 ## License
 

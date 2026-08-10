@@ -147,6 +147,7 @@ typealias Observer<T> = (T) -> Void   // naming the type is the documentation
 **Stateful** — the view model owns a state machine and notifies on change:
 
 ```swift
+@MainActor
 final class FeedViewModel {
     private enum State { case pending, loading, loaded([FeedImage]), failed }
     private var state: State = .pending { didSet { onChange?(self) } }
@@ -154,6 +155,18 @@ final class FeedViewModel {
     var onChange: Observer<FeedViewModel>?
     var isLoading: Bool { if case .loading = state { return true }; return false }
     var feed: [FeedImage]? { if case let .loaded(feed) = state { return feed }; return nil }
+
+    private let loadFeed: () async throws -> [FeedImage]
+
+    init(loadFeed: @escaping () async throws -> [FeedImage]) {
+        self.loadFeed = loadFeed
+    }
+
+    func load() async {
+        state = .loading
+        do { state = .loaded(try await loadFeed()) }
+        catch { state = .failed }
+    }
 }
 ```
 
@@ -161,6 +174,33 @@ final class FeedViewModel {
 change, and the transition is passed directly through the closure:
 
 ```swift
+@MainActor
+final class FeedViewModel {
+    var onLoadingStateChange: Observer<Bool>?
+    var onFeedLoad: Observer<[FeedImage]>?
+
+    private let loadFeed: () async throws -> [FeedImage]
+
+    init(loadFeed: @escaping () async throws -> [FeedImage]) {
+        self.loadFeed = loadFeed
+    }
+
+    func load() async {
+        onLoadingStateChange?(true)
+        if let feed = try? await loadFeed() { onFeedLoad?(feed) }
+        onLoadingStateChange?(false)
+    }
+}
+```
+
+`@MainActor` on the view model keeps every observer callback on the main thread with no `weak
+self` dance — the binder (the view controller) is already main-actor-isolated.
+
+For codebases not yet migrated to async/await, the **closure-era original** of the stateless
+variant looks like this — same shape, with the loader's completion closure replacing `await`:
+
+```swift
+// Closure-era original — keep only while the loader itself is completion-based.
 final class FeedViewModel {
     var onLoadingStateChange: Observer<Bool>?
     var onFeedLoad: Observer<[FeedImage]>?
@@ -441,7 +481,9 @@ Endpoints of this arc, with code: `LoadResourcePresenter` in `architecture-layer
 `@Observable` collapses the binder: SwiftUI observes the view model directly, so there is no
 adapter → proxy → presenter chain and **no `WeakRefVirtualProxy`** (SwiftUI owns the view
 lifecycle). The presentation layer's static mappers, view-model structs and localized strings are
-reused unchanged — the boundary rules do not move, only the binding mechanism.
+reused unchanged — the boundary rules do not move, only the binding mechanism. Deep coverage —
+`@main App` composition root, environment DI, `@Observable` presenters, routing at the root —
+lives in [swiftui-composition.md](swiftui-composition.md).
 
 ---
 

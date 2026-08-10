@@ -113,6 +113,14 @@ public protocol FeedImageDataStore {
 
 **Rules**: Models own no behavior. Protocols define single-responsibility boundaries. Each protocol maps to one use case.
 
+> **Why do these single-method protocols exist when the API layer forbids `FeedLoader`?** A
+> protocol earns its place when there are multiple implementations/strategies to select between, or
+> when the boundary needs interception — composite, decorator, fallback all require a named
+> abstraction to wrap. `FeedCache`, `FeedImageDataLoader` and `FeedImageDataCache` each have both:
+> real alternative implementations and decorator/fallback compositions at the root. A closure
+> suffices when there is exactly one implementation and no interception need — which is why
+> `FeedLoader` was deleted but `FeedCache` stays.
+
 > **Infrastructure interfaces should be dumb.** `HTTPClient` and `FeedStore` exist only to fulfil
 > commands sent by a controller type through the boundary — "fetch something from the cache",
 > "download an image from a remote URL". No implementation of them ever contains a rule like "only
@@ -152,8 +160,9 @@ public enum FeedEndpoint {
 ```
 
 ```swift
-// Static mapper — private Decodable types, public static function
-public final class FeedItemsMapper {
+// Static mapper — caseless enum (uninstantiable namespace), private Decodable types,
+// public static function
+public enum FeedItemsMapper {
     private struct Root: Decodable {
         private let items: [RemoteFeedItem]
 
@@ -191,7 +200,7 @@ public protocol HTTPClient {
 }
 ```
 
-**Rules**: Mappers are `final class` with `static` methods — no instances. Decodable types are `private`. Errors are typed enums. `HTTPClient` is a protocol, not `URLSession` directly.
+**Rules**: Mappers are caseless `enum`s with `static` methods — a caseless enum cannot be instantiated, so it needs no private `init` (see `design-principles.md` on stateless namespaces). Decodable types are `private`. Errors are typed enums. `HTTPClient` is a protocol, not `URLSession` directly.
 
 - **Status-code contracts are per endpoint.** The feed mapper accepts exactly `200`; the image-comments mapper accepts any `2xx` (`(200...299).contains(...)`). Assert the exact accepted range per mapper — do not share one `isOK`.
 - **Pagination is keyset-based** (a.k.a. the seek method), not limit/offset: `after_id=<last item's id>`.
@@ -377,7 +386,7 @@ public final class LoadResourcePresenter<Resource, View: ResourceView> {
     public static var loadError: String {
         NSLocalizedString("GENERIC_CONNECTION_ERROR",
                           tableName: "Shared",
-                          bundle: Bundle(for: Self.self),
+                          bundle: Bundle.module,
                           comment: "Error message displayed when we can't load the resource from the server")
     }
 
@@ -421,7 +430,7 @@ public final class LoadResourcePresenter<Resource, View: ResourceView> {
 
 **Rules**: Presenter has no UIKit/SwiftUI imports. The `Mapper` typealias allows resource transformation (e.g., `Data -> UIImage`). Identity mapper convenience init eliminates boilerplate when types match.
 
-- **Bundle**: error strings use `NSLocalizedString` with `Bundle(for: Self.self)` in **framework** targets, `Bundle.module` in **SPM** targets.
+- **Bundle**: error strings use `NSLocalizedString` with `Bundle.module` in **SPM** targets (this skill's recommended layout — see `spm-project-structure.md`); use `Bundle(for: Self.self)` in a plain **framework** target, where `Bundle.module` does not exist.
 - **Presenters create ALL presentation data**, including the screen `title` (a presenter property using `NSLocalizedString`); composers assign it to the view — the view controller stays agnostic of presenters.
 - **Locale/time-dependent view models** inject their context as *defaulted* parameters of the static `map`, so production call-sites stay clean and tests pin a fixed locale:
 
@@ -460,10 +469,14 @@ public final class ListViewController: UITableViewController,
     }
 
     // Diffable only reloads CHANGED items, so it won't reflow on a Dynamic Type change —
-    // reload when the content size category changes.
-    public override func traitCollectionDidChange(_ previous: UITraitCollection?) {
-        if previous?.preferredContentSizeCategory != traitCollection.preferredContentSizeCategory {
-            tableView.reloadData()
+    // reload when the content size category changes. `traitCollectionDidChange(_:)` is
+    // deprecated since iOS 17; register for the specific trait instead (unregistration
+    // happens automatically at the end of the view controller's lifecycle).
+    public override func viewDidLoad() {
+        super.viewDidLoad()
+
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, previous: UITraitCollection) in
+            self.tableView.reloadData()
         }
     }
 }
@@ -471,12 +484,19 @@ public final class ListViewController: UITableViewController,
 
 **Rules**: View controllers are thin — display logic only. `onRefresh` closure decouples from specific loading logic. Multiple sections supported via variadic parameter.
 
+> On iOS 17+ there is also automatic trait tracking: traits read inside `layoutSubviews()`,
+> `draw(_:)`, `updateConstraints()` and similar update callbacks auto-invalidate when the trait
+> changes, with no registration at all — registration is only needed outside those callbacks, as
+> here.
+
 ---
 
 ## UI Layer — SwiftUI Equivalent
 
 Same architectural boundaries, different binding mechanism. An `@Observable` view model replaces the adapter → `WeakRefVirtualProxy` → presenter chain: SwiftUI manages view lifecycle, so the proxy is unnecessary. The Composition Root still creates the view model (injecting the `() async throws -> Resource` loader) and passes it via `@State`/`.environment()`. The presenter's static mappers and localized strings are reused as-is from the Presentation layer.
 
+Deep coverage of the SwiftUI side — `@main App` composition root, environment DI, routing at the
+root, `@Observable` presenters — now lives in [swiftui-composition.md](swiftui-composition.md).
 For SwiftUI specifics (state management, view composition, `@Observable` patterns), use the `swiftui-expert` skill.
 
 ---

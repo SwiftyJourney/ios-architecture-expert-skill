@@ -188,7 +188,21 @@ cancellable = Task { @MainActor [weak self] in  // BAD
 }
 ```
 
-**Availability**: `Task.immediate` requires a Swift 6.2-era toolchain and recent deployment targets (the case study's deployment target is iOS 26). On older targets use plain `Task` and preserve the synchronous-`didStartLoading` guarantee another way (e.g. call `didStartLoading()` before creating the Task, as above).
+**Availability**: `Task.immediate` is SE-0472 (Implemented, Swift 6.2), with runtime availability aligned to **iOS 26 / macOS 26** and **no back-deployment**. On earlier deployment targets, guard it and fall back to plain `Task`:
+
+```swift
+#if compiler(>=6.2)
+if #available(iOS 26.0, macOS 26.0, *) {
+    Task.immediate { await self.load() }
+} else {
+    Task { await self.load() }
+}
+#else
+Task { await self.load() }
+#endif
+```
+
+On the fallback path the work is *enqueued* rather than started synchronously, so tests relying on eager execution must await observable state instead — and preserve the synchronous-`didStartLoading` guarantee another way (e.g. call `didStartLoading()` before creating the Task, as above).
 
 ### Fire-and-forget with `Task.immediate`
 
@@ -257,6 +271,10 @@ deinit { cancellable?.cancel() }
 ```
 
 When the adapter is deallocated (view dismissed), in-flight tasks are cancelled automatically.
+This compiles clean under Swift 6 strict concurrency only because it touches the object's own
+`Sendable` stored property (`Task` is `Sendable`); touching any *other* `@MainActor` state from
+`deinit` requires `isolated deinit` (SE-0371, Swift 6.2 compiler; no OS floor for `@MainActor`
+classes, macOS 15.4/iOS 18.4 floor for plain actors).
 
 **3. Explicit user-initiated cancellation**:
 ```swift
@@ -311,6 +329,26 @@ Annotate PUBLIC view protocols `@MainActor` explicitly even when the target buil
 | `CoreDataFeedStore` | Yes | Explicit `Sendable` conformance, `let` properties |
 | `InMemoryFeedStore` | No | `@MainActor` provides isolation instead |
 | `ResourceLoadingViewModel` | Implicit | `struct` with `Bool` property |
+
+### Newer tools at the boundary
+
+Two additions to the vocabulary matter architecturally.
+
+**Region-based isolation and `sending` (SE-0414/SE-0430).** The compiler now tracks *regions* of
+values, not just types: a freshly created non-`Sendable` value that nothing else references sits in
+a disconnected region and may legally cross an isolation boundary. This is exactly why the
+`Scheduler.schedule<T>` signature needs **no** `T: Sendable` constraint — the closure creates its
+result inside the store's context and hands it back as a fresh value, and the signature compiles
+with zero warnings under complete checking even when `T` is non-`Sendable`. What region analysis
+still rejects is capturing an *existing* main-actor-connected non-`Sendable` value into the
+`@Sendable` closure — that value's region is already shared. Cosmetic note: `schedule` is
+`rethrows`, so non-throwing call sites should drop the `try`.
+
+**`isolated deinit` (SE-0371, Swift 6.2 compiler).** A plain `deinit` may only touch the object's
+own `Sendable` stored properties (which is why `deinit { cancellable?.cancel() }` is fine); an
+`isolated deinit` runs on the type's actor and may touch other isolated state. For `@MainActor`
+classes it has no OS availability floor (the runtime thunk back-deploys); for plain actors it is
+gated at macOS 15.4 / iOS 18.4.
 
 ---
 
@@ -469,5 +507,5 @@ study, exactly that test caught a race the Swift 6 compiler accepted silently.
 - [ ] All `@Sendable` closures capture only `Sendable` values
 - [ ] Run Thread Sanitizer in CI (xcodebuild flag `-enableThreadSanitizer YES`) — zero data races
 - [ ] Run with `-com.apple.CoreData.ConcurrencyDebug 1` in test schemes — zero context-queue violations
-- [ ] `Task.immediate` used where synchronous-first execution is needed
+- [ ] `Task.immediate` used where synchronous-first execution is needed (iOS 26+ targets; earlier targets use plain `Task` with observable-state-based tests)
 - [ ] `Task.isCancelled` checked after every `await` in adapter code

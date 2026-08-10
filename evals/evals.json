@@ -94,6 +94,47 @@
         "The offline experience is achieved through a cache/fallback composition rather than a connectivity branch inside the view model",
         "No shared mutable ConnectivityService is introduced that components read directly"
       ]
+    },
+    {
+      "id": "spm-module-structure-two-features",
+      "prompt": "Our app has two features (Feed and ImageComments) built clean-architecture style. We're moving from one Xcode target with folders to a modular SPM setup. Propose the package layout: which targets, which products, what depends on what, where CoreData and the localized presentation strings live, where shared code (HTTPClient, the generic presenter) goes, and how the Xcode app target consumes it all. Include the Package.swift.",
+      "expected_output": "A local-package layout with per-feature vertical slices layered horizontally inside (Feed, FeedAPI, FeedCache, FeedCacheInfra, FeedPresentation, FeediOS / ImageComments*), shared modules (SharedAPI, SharedPresentation) justified by generalization, a coherent Package.swift whose targets match the tree, the app target consuming the local package and hosting the Composition Root, and inward-only dependency rules.",
+      "assertions": [
+        "Slices vertically by feature and horizontally by layer inside each slice; feature modules never import each other",
+        "Presentation is its own platform-agnostic target (or a stated equivalent), not folded silently into the domain or UI target",
+        "CoreData implementations live in an infra target separate from the protocol/business-logic cache target, with .process resources for the model",
+        "Shared modules (HTTPClient protocol, generic presenter) are small and justified by two consumers, with the bottleneck warning or equivalent reasoning",
+        "The Package.swift target list matches the proposed folder tree one-to-one, with coherent platform pairs",
+        "The app consumes the package as a LOCAL package reference and hosts the Composition Root; nothing depends on the root",
+        "Cross-feature navigation (feed cell to its comments) is composed in the root, not by one feature importing the other"
+      ]
+    },
+    {
+      "id": "swiftui-composition-root",
+      "prompt": "New SwiftUI app (iOS 26, Swift 6). I have Feed and Comments modules from our shared package, with a FeedService actor-ish orchestrator already written. There's no SceneDelegate anymore -- where do I wire everything up, how do views get their dependencies, and who owns navigation? Right now each View creates its own @State view model and pushes destinations itself. Write the composition code.",
+      "expected_output": "An @main App-based Composition Root: a composer owned via @State/static holding lazy infrastructure and FeedService, factory methods creating @Observable view models injected into views via init, environment reserved for cross-cutting values, and a NavigationStack(path:) navigation model owned by the root with feature views emitting selection closures instead of pushing destinations.",
+      "assertions": [
+        "Identifies @main App/Scene as the Composition Root and moves all wiring there (views no longer construct their own view models)",
+        "Guards against App re-instantiation rebuilding the graph (@State or static let for the composer)",
+        "Uses init injection for required dependencies and reserves the environment for cross-cutting values, stating the compile-time vs runtime-failure tradeoff",
+        "Navigation: a path-backed model owned by the root, navigationDestination mapping at the root, feature views emit intents (closures) rather than appending routes",
+        "View models are @Observable @MainActor classes receiving composed closures (loadFeed) rather than concrete loaders",
+        "Does not introduce a one-implementation Router/Coordinator protocol",
+        "FeedService and the modules below remain unchanged -- only composition code is written"
+      ]
+    },
+    {
+      "id": "composition-root-wiring-review",
+      "prompt": "Review this SceneDelegate: it creates URLSessionHTTPClient in three places, builds a new CoreDataFeedStore per screen, calls FeedUIComposer from inside FeedViewController when navigating to comments, and crashes at startup if CoreData fails to load. What's wrong and how should it be structured?",
+      "expected_output": "A review naming: duplicated infrastructure must become single lazy instances with lifetimes decided by the composer; per-screen store defeats caching and must be shared; a view controller invoking the composer is a module depending on the Composition Root (inverted arrow) -- navigation must be composed in the root via a selection closure; and store-initialization failure needs a deliberate strategy (in-memory fallback or Null Object, logged) rather than a crash.",
+      "assertions": [
+        "Flags the three HTTP client instances and prescribes one lazily-created instance owned by the composition root",
+        "Flags the per-screen CoreDataFeedStore as both a lifetime bug and a caching defeat; store becomes a single shared instance",
+        "Identifies FeedViewController calling FeedUIComposer as a dependency-direction violation (production code depending on the root) and fixes it with an injected selection closure composed in the root",
+        "Treats CoreData init failure as a product decision: in-memory fallback or Null Object, explicitly logged -- not a silent crash and not presented as the one universal answer",
+        "Notes that object lifetimes (singleton-lifetime vs per-screen) are the composer's decision, distinct from the Singleton pattern",
+        "The proposed structure keeps the composition root as the only place importing all modules"
+      ]
     }
   ]
 }

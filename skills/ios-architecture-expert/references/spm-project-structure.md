@@ -15,8 +15,11 @@ Jump to:
 - [Onion architecture](#onion-architecture)
 - [Horizontal vs vertical slicing](#horizontal-vs-vertical-slicing)
 - [How physically separated should modules be?](#how-physically-separated-should-modules-be)
-- [Module Layout](#module-layout)
+- [Module Layout](#module-layout) (+ [consuming the package](#how-the-app-consumes-the-package), [inside a module](#inside-a-module))
 - [Package.swift Example](#packageswift-example)
+- [Adding a second feature](#adding-a-second-feature--what-slicing-looks-like-on-disk)
+- [Where the Composition Root lives](#where-the-composition-root-lives)
+- [Static vs dynamic linking](#static-vs-dynamic-linking)
 - [Build Settings](#build-settings--swift-6-strict-concurrency)
 - [Resource Declarations](#resource-declarations)
 - [Dependency Graph](#dependency-graph)
@@ -118,123 +121,234 @@ depends on it.
 
 ## Module Layout
 
+One feature (`Feed`), sliced horizontally. Target names, folder names and product names match
+one-to-one — no `path:` overrides to remember:
+
 ```
 MyApp/
-├── Package.swift
-├── Sources/
-│   ├── Feature/              # Domain models + use-case protocols (Foundation only)
-│   ├── FeatureAPI/           # HTTPClient protocol, endpoint enums, static mappers
-│   ├── FeatureCache/         # Store protocols, local models, loaders, cache policy
-│   ├── FeatureCacheInfra/    # CoreData/InMemory store implementations
-│   ├── FeatureiOS/           # UIKit views, cell controllers (imports UIKit)
-│   └── FeatureSwiftUI/       # SwiftUI views (imports SwiftUI)
-├── Tests/
-│   ├── FeatureTests/         # Unit tests for domain, API, cache, presentation
-│   ├── FeatureCacheInfraTests/  # Integration tests with real CoreData
-│   ├── FeatureiOSTests/      # Snapshot tests
-│   └── FeatureEndToEndTests/ # API end-to-end tests
-└── App/                      # Xcode app target — Composition Root
-    ├── CompositionRoot/
-    │   ├── FeedService.swift
-    │   ├── FeedUIComposer.swift
-    │   ├── Adapters/
-    │   └── Proxies/
-    └── SceneDelegate.swift
+├── MyApp.xcodeproj           # the app — consumes the local package (see below)
+├── App/                      # app target sources — Composition Root
+│   ├── MyAppApp.swift        #   @main App (SwiftUI) — or AppDelegate/SceneDelegate (UIKit)
+│   ├── CompositionRoot/
+│   │   ├── FeedService.swift
+│   │   ├── FeedUIComposer.swift
+│   │   ├── Adapters/         #   presentation adapters (LoadResourcePresentationAdapter…)
+│   │   └── Proxies/          #   WeakRefVirtualProxy and friends
+│   └── Resources/            #   app icon, launch screen, Info.plist
+└── Modules/                  # ONE local package, many targets
+    ├── Package.swift
+    ├── Sources/
+    │   ├── Feed/                 # Domain models + boundary contracts (Foundation only)
+    │   ├── FeedAPI/              # Endpoint enums, static mappers (Foundation only)
+    │   ├── FeedCache/            # Store protocols, local models, loaders, cache policy (Foundation only)
+    │   ├── FeedCacheInfra/       # CoreData/InMemory store implementations (imports CoreData)
+    │   ├── FeedPresentation/     # Presenters, view models, localized strings (Foundation only)
+    │   ├── FeediOS/              # UIKit views, cell controllers (imports UIKit)
+    │   └── FeedSwiftUI/          # SwiftUI views (imports SwiftUI) — ship FeediOS, FeedSwiftUI, or both
+    └── Tests/
+        ├── FeedTests/            # Unit tests: domain, API, cache, presentation
+        ├── FeedCacheInfraTests/  # Integration tests with real CoreData
+        ├── FeediOSTests/         # Snapshot tests
+        └── FeedEndToEndTests/    # API end-to-end tests (CI-only scheme)
 ```
 
-**Key rule**: `Feature` and `FeatureAPI`/`FeatureCache` import only Foundation. `FeatureCacheInfra` imports CoreData. `FeatureiOS` imports UIKit. `FeatureSwiftUI` imports SwiftUI. The app target imports everything — it is the only place where all modules converge.
+**Key rule**: `Feed`, `FeedAPI`, `FeedCache` and `FeedPresentation` import only Foundation.
+`FeedCacheInfra` imports CoreData. `FeediOS` imports UIKit; `FeedSwiftUI` imports SwiftUI. The app
+target imports everything — it is the only place where all modules converge.
 
-**Why `FeatureCacheInfra` is separate**: Infrastructure implementations (`CoreDataFeedStore`, `InMemoryFeedStore`) depend on specific frameworks (CoreData). Separating them from `FeatureCache` (which defines protocols and business logic) keeps the cache layer framework-free and testable with in-memory doubles.
+**Why `FeedCacheInfra` is separate**: infrastructure implementations (`CoreDataFeedStore`,
+`InMemoryFeedStore`) depend on specific frameworks (CoreData). Separating them from `FeedCache`
+(which defines protocols and business logic) keeps the cache layer framework-free and testable
+with in-memory doubles.
+
+**Why `FeedPresentation` is its own target**: presenters are platform-agnostic by design — that is
+the whole argument for MVP's cross-platform presentation layer. Folding them into `Feed` would
+make the domain target carry localized string tables; folding them into `FeediOS` would tie them
+to UIKit. A separate target keeps both boundaries compiler-enforced (and lets `FeedSwiftUI` and
+`FeediOS` share the same presenters).
+
+### How the app consumes the package
+
+The app is an Xcode project; the modules are a **local package** inside the same repo:
+
+1. In Xcode: **File → Add Package Dependencies… → Add Local…** and select `Modules/` (this stores
+   a relative `XCLocalSwiftPackageReference` in the project — no versioning, always live), then add
+   the library products to the app target's *Frameworks, Libraries, and Embedded Content*.
+2. From another *package* (rare — e.g. a dev-app package), the same thing is
+   `.package(path: "../Modules")`.
+3. Test plans/schemes: the app's scheme runs the app + acceptance tests; add the package's test
+   targets to a `CI` test plan so `xcodebuild test` covers both. Editing the package and the app
+   in one workspace works out of the box — a local package needs no "Open in new window" dance.
+
+Local-package modularity keeps level-3/4 boundaries (compiler-enforced imports) at monorepo cost —
+no version pinning, no separate releases, cross-module refactors in one commit.
+
+### Inside a module
+
+Group by **role within the layer**, mirroring the case study's proven groups — not by type
+(`Protocols/`, `Extensions/` folders are how related code gets scattered):
+
+```
+Sources/FeedCache/
+├── FeedStore.swift               # the boundary protocol(s)
+├── LocalFeedLoader.swift         # the use case (split per CQS when it grows)
+├── LocalFeedImage.swift          # the layer's data-transfer representation
+├── FeedCachePolicy.swift         # pure policy — deterministic core
+└── Helpers/                      # layer-private helpers only
+
+Tests/FeedTests/Feed Cache/
+├── CacheFeedUseCaseTests.swift   # one suite per use case…
+├── LoadFeedFromCacheUseCaseTests.swift
+├── ValidateFeedCacheUseCaseTests.swift
+└── Helpers/                      # FeedStoreSpy, shared factories
+```
+
+Test folders mirror production groups one-to-one, and suites are named for **use cases**, not for
+classes — three suites over `LocalFeedLoader` is correct, one `LocalFeedLoaderTests` is not.
 
 ---
 
 ## Package.swift Example
 
 ```swift
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
+// NOTE: the `.v26` platform constants and `.defaultIsolation` require tools 6.2. The concurrency
+// patterns in this skill (e.g. `Task.immediate`) additionally need an iOS 26-era deployment
+// target — on older targets fall back to plain `Task` (see concurrency-at-boundaries.md).
 import PackageDescription
 
 let package = Package(
-    name: "Feed",
-    // NOTE: the concurrency patterns in this skill (e.g. `Task.immediate`) need a Swift 6.2-era
-    // toolchain and a recent deployment target. Do not pair them with .iOS(.v17) — bump the
-    // platforms to match, or fall back to plain `Task` (see concurrency-at-boundaries.md).
-    platforms: [.iOS(.v26), .macOS(.v15)],
+    name: "Modules",
+    platforms: [.iOS(.v26), .macOS(.v26)],
     products: [
         .library(name: "Feed", targets: ["Feed"]),
         .library(name: "FeedAPI", targets: ["FeedAPI"]),
         .library(name: "FeedCache", targets: ["FeedCache"]),
         .library(name: "FeedCacheInfra", targets: ["FeedCacheInfra"]),
+        .library(name: "FeedPresentation", targets: ["FeedPresentation"]),
         .library(name: "FeediOS", targets: ["FeediOS"]),
+        .library(name: "FeedSwiftUI", targets: ["FeedSwiftUI"]),
     ],
     targets: [
         // Feature layer — Foundation only
-        .target(
-            name: "Feed",
-            dependencies: [],
-            path: "Sources/Feature"
-        ),
+        .target(name: "Feed"),
 
         // API layer — depends on Feature for domain models
-        .target(
-            name: "FeedAPI",
-            dependencies: ["Feed"],
-            path: "Sources/FeatureAPI"
-        ),
+        .target(name: "FeedAPI", dependencies: ["Feed"]),
 
         // Cache layer — depends on Feature for domain models (Foundation only)
-        .target(
-            name: "FeedCache",
-            dependencies: ["Feed"],
-            path: "Sources/FeatureCache"
-        ),
+        .target(name: "FeedCache", dependencies: ["Feed"]),
 
         // Cache infrastructure — CoreData/InMemory implementations
         .target(
             name: "FeedCacheInfra",
             dependencies: ["FeedCache"],
-            path: "Sources/FeatureCacheInfra",
             resources: [
                 .process("CoreData/FeedStore.xcdatamodeld"),
             ]
         ),
 
-        // iOS UI layer — depends on Feature for view models
+        // Presentation — platform-agnostic presenters + localized tables
         .target(
-            name: "FeediOS",
+            name: "FeedPresentation",
             dependencies: ["Feed"],
-            path: "Sources/FeatureiOS",
             resources: [
-                .process("Feed UI/Feed.storyboard"),
-                .process("Shared Presentation/Shared.strings"),
+                .process("Feed.strings"),
             ]
         ),
 
-        // Unit tests
+        // UI layers — pick one, or ship both against the same presenters
+        .target(
+            name: "FeediOS",
+            dependencies: ["Feed", "FeedPresentation"],
+            resources: [
+                .process("Feed UI/Feed.storyboard"),
+            ]
+        ),
+        .target(name: "FeedSwiftUI", dependencies: ["Feed", "FeedPresentation"]),
+
+        // Unit tests — domain, API, cache, presentation
         .testTarget(
             name: "FeedTests",
-            dependencies: ["Feed", "FeedAPI", "FeedCache"],
-            path: "Tests/FeatureTests"
+            dependencies: ["Feed", "FeedAPI", "FeedCache", "FeedPresentation"]
         ),
 
-        // Cache infrastructure integration tests
-        .testTarget(
-            name: "FeedCacheInfraTests",
-            dependencies: ["FeedCacheInfra", "FeedCache"],
-            path: "Tests/FeatureCacheInfraTests"
-        ),
+        // Cache infrastructure integration tests (real CoreData)
+        .testTarget(name: "FeedCacheInfraTests", dependencies: ["FeedCacheInfra", "FeedCache"]),
 
         // Snapshot tests
-        .testTarget(
-            name: "FeediOSTests",
-            dependencies: ["FeediOS", "Feed"],
-            path: "Tests/FeatureiOSTests"
-        ),
+        .testTarget(name: "FeediOSTests", dependencies: ["FeediOS", "FeedPresentation"]),
+
+        // API end-to-end tests — CI-only scheme
+        .testTarget(name: "FeedEndToEndTests", dependencies: ["Feed", "FeedAPI"]),
     ]
 )
 ```
 
-> Test targets depend on the modules under test and `import` them plainly — **never** `@testable import`. Tests exercise each module through its public API only; if a test can't reach what it needs, expose a public seam rather than widening access. The App target is the exception: nothing depends on the Composition Root, so its types need not be `public` and its own tests may use `@testable`. See [testing-strategy.md](testing-strategy.md#0-test-through-the-public-api-no-testable-import).
+With names, folders and products aligned, no target needs a `path:` override — `Sources/<name>`
+and `Tests/<name>` are the defaults.
+
+> Test targets depend on the modules under test and `import` them plainly — **never** `@testable import`. Tests exercise each module through its public API only; if a test can't reach what it needs, expose a public seam rather than widening access. The App target is the exception: nothing depends on the Composition Root, so its types need not be `public` and its own tests may use `@testable`. See [testability-and-seams.md](testability-and-seams.md#0-test-through-the-public-api-no-testable-import).
+
+---
+
+## Adding a second feature — what slicing looks like on disk
+
+The layout above is one vertical slice. Here is the same package with a second feature
+(`ImageComments`) and the cross-cutting modules that emerge — mirroring the case study's proven
+groups (`Shared API`, `Shared Presentation`):
+
+```
+Modules/Sources/
+├── Feed/                     ├── ImageComments/            # each feature: its own vertical slice,
+├── FeedAPI/                  ├── ImageCommentsAPI/         # horizontally layered inside
+├── FeedCache/                ├── ImageCommentsPresentation/
+├── FeedCacheInfra/           ├── ImageCommentsiOS/
+├── FeedPresentation/         │
+├── FeediOS/                  │   # note: no ImageCommentsCache — a feature only
+│                             │   # grows the layers it needs
+├── SharedAPI/                # HTTPClient protocol, Paginated<Item> (Foundation only)
+├── SharedAPIInfra/           # URLSessionHTTPClient (imports Foundation networking)
+├── SharedPresentation/       # LoadResourcePresenter<Resource, View>, Resource*View models
+└── SharediOS/                # ListViewController, CellController, shared UIKit helpers
+```
+
+The rules that keep this honest:
+
+- **Feature slices never import each other.** `Feed` and `ImageComments` are connected only in the
+  Composition Root (navigation from a feed cell to its comments is composed there — neither module
+  knows the other exists).
+- **`Shared*` modules earn their existence by generalization, not by anticipation.** They hold
+  code that *two* features already demanded (the generalization arc in
+  `presentation-patterns.md`) — never code that "might be shared someday".
+- **Watch the incoming arrows.** Every feature depends on `SharedAPI` and `SharedPresentation`,
+  which makes them change-bottlenecks: keep them tiny, abstract and stable. If a shared module
+  starts accumulating feature-specific knowledge, that code was never shared — move it back.
+- A feature adds only the layers it needs — `ImageComments` has no cache, so there is no empty
+  `ImageCommentsCache` target "for symmetry".
+
+## Where the Composition Root lives
+
+Default: **in the app target**, as plain folders (`App/CompositionRoot/`). Nothing may depend on
+the Composition Root, so it gains nothing from being a package target — and leaving it in the app
+target lets its types stay `internal` and lets acceptance tests use `@testable import` (the one
+sanctioned place — see `testability-and-seams.md`).
+
+Promote it to a dedicated `CompositionRoot` package target only when something real forces it —
+two app targets (App Clip, widget, watch app) that must share wiring, or a dev-harness app that
+boots slices of the graph. Then it is the **one** target that imports every module, the app
+target shrinks to `@main` plus lifecycle, and its composers must become `public`. The dependency
+rule is unchanged: everything points inward, nothing points at the root.
+
+## Static vs dynamic linking
+
+SwiftPM builds library targets as **static** by default, and static is what you want here: with
+seven-plus targets per feature, dynamic frameworks would each cost dyld work at launch. Reach for
+`.library(type: .dynamic)` only when one binary must be shared across independently-loaded
+products (app + extensions embedding the same large module) — and consider **mergeable
+libraries** (Xcode 15+) when you want dynamic-in-Debug, static-in-Release behaviour. The module
+*boundaries* are identical either way; linking is a deployment detail, so decide it by
+launch-time and app-size measurements, not by architecture.
 
 ---
 
@@ -242,24 +356,30 @@ let package = Package(
 
 | Setting | SwiftPM (`Package.swift`) | Xcode (`.pbxproj`) | Why it matters |
 |---|---|---|---|
-| Language mode | `swift-tools-version: 6.0` | Swift Language Version = 6 | Enables strict concurrency by default |
+| Language mode | `swift-tools-version: 6.0`+ (6.2 for `.v26`/`.defaultIsolation`) | Swift Language Version = 6 | Enables strict concurrency by default |
 | Strict concurrency | Enabled by default in Swift 6 | `SWIFT_STRICT_CONCURRENCY = complete` | Compile-time data-race safety |
 | Upcoming features | `.enableUpcomingFeature("...")` in `swiftSettings` | `SWIFT_UPCOMING_FEATURE_*` | Opt-in to future language changes |
 
-For projects not yet on Swift 6, enable strict concurrency incrementally:
+For targets not yet on the Swift 6 language mode, enable strict concurrency *warnings* first:
 
 ```swift
 // In Package.swift targets
 .target(
     name: "Feed",
-    dependencies: [],
     swiftSettings: [
-        .enableExperimentalFeature("StrictConcurrency=complete")
+        .swiftLanguageMode(.v5),
+        .enableUpcomingFeature("StrictConcurrency")
     ]
 )
 ```
 
-Enable on **all targets** — Feature, API, Cache, CacheInfra, iOS, and App. Inconsistent settings across modules hide data-race issues at module boundaries.
+(The older `.enableExperimentalFeature("StrictConcurrency=complete")` spelling still works on
+current toolchains, but unknown *experimental* feature names are silently ignored — if a future
+compiler drops the name, you lose the checking without a single diagnostic. The upcoming-feature
+spelling fails loudly instead; verified on Swift 6.3.3.)
+
+Enable on **all targets** — feature, API, cache, infra, presentation, UI, and App. Inconsistent
+settings across modules hide data-race issues at module boundaries.
 
 ### Multi-platform support as boundary enforcement
 
@@ -328,12 +448,17 @@ Feed (Foundation)
     +-- FeedCache (Foundation)
     |       |
     |       +-- FeedCacheInfra (CoreData)
-    +-- FeediOS (UIKit)
+    +-- FeedPresentation (Foundation)
             |
-            App Target (imports all — Composition Root)
+            +-- FeediOS (UIKit)
+            +-- FeedSwiftUI (SwiftUI)
+                    |
+                    App Target (imports all — Composition Root)
 ```
 
-Dependencies flow **inward**: UI -> Feature, Cache -> Feature, API -> Feature. The Feature module depends on nothing. The App target depends on everything but is the thinnest layer — just wiring.
+Dependencies flow **inward**: UI -> Presentation -> Feature, Cache -> Feature, API -> Feature.
+The `Feed` module depends on nothing. The App target depends on everything but is the thinnest
+layer — just wiring.
 
 ---
 
@@ -368,19 +493,26 @@ End-to-end API tests get their own CI-only scheme so they never run in the fast 
 
 ## Guardrails
 
-- Do not add UIKit/SwiftUI imports to Feature, API, or Cache targets
-- Do not skip `FeatureCacheInfra` — CoreData implementations belong in infrastructure, not in the cache layer
+- Do not add UIKit/SwiftUI imports to feature, API, cache, or presentation targets
+- Do not skip `FeedCacheInfra` — CoreData implementations belong in infrastructure, not in the cache layer
+- Do not fold presenters into the domain or UI target — `FeedPresentation` is its own platform-agnostic target
 - Do not mix test types in the same target — keep unit, integration, snapshot, and acceptance tests separate
 - Do not use `Bundle(for:)` in SPM targets — use `Bundle.module`
 - Do not split into physically separated modules before you have the problem it solves — start with folders and escalate
 - Do not create a shared module that every other module depends on — let the Composition Root do the sharing
+- Do not let feature modules import each other — cross-feature flows are composed in the root
 - Do not let a feature module depend on the Composition Root — that is a circular dependency waiting to happen
+- Do not make library products `.dynamic` by default — static is the right default; measure first
 
 ## Verification
 
-- [ ] `swift-tools-version: 6.0` (or strict concurrency enabled via `swiftSettings`)
-- [ ] `Feature` target has zero dependencies
-- [ ] `FeatureAPI` and `FeatureCache` depend only on `Feature`
-- [ ] `FeatureCacheInfra` depends on `FeatureCache` and declares CoreData resources
+- [ ] `swift-tools-version` matches the APIs used (6.2 for the `.v26` platform constants)
+- [ ] Platform pairs are coherent (`.iOS(.v26)` goes with `.macOS(.v26)` — SwiftPM won't check this for you)
+- [ ] Every target in the layout tree exists in `Package.swift`, and vice versa
+- [ ] `Feed` target has zero dependencies
+- [ ] `FeedAPI`, `FeedCache` and `FeedPresentation` depend only on `Feed`
+- [ ] `FeedCacheInfra` depends on `FeedCache` and declares CoreData resources
+- [ ] UI targets depend on `FeedPresentation`, never the reverse
+- [ ] No feature module imports another feature module
 - [ ] All targets build with `SWIFT_STRICT_CONCURRENCY = complete` — zero warnings
 - [ ] CI runs with `-enableThreadSanitizer YES`

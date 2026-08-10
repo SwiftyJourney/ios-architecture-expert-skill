@@ -106,7 +106,7 @@ extension LoadResourcePresentationAdapter: FeedImageCellControllerDelegate {
 - `[weak self]` prevents retain cycles between the adapter and the task
 - `isLoading` guard prevents duplicate requests
 - `Task.isCancelled` checks after every `await` prevent stale results from reaching the presenter
-- `deinit` cancels in-flight tasks when the adapter is deallocated
+- `deinit` cancels in-flight tasks when the adapter is deallocated. This compiles clean under Swift 6 strict concurrency only because it touches the object's own `Sendable` stored property (`Task` is `Sendable`); touching any *other* `@MainActor` state from `deinit` requires `isolated deinit` (SE-0371, Swift 6.2 compiler; no OS floor for `@MainActor` classes, macOS 15.4/iOS 18.4 floor for plain actors)
 - `didCancelImageRequest()` provides explicit cancellation for prefetching
 - `presenter` is deliberately a `var` (property injection) — the adapter→presenter→view→adapter cycle can only be closed after construction, in the Composition Root. Everywhere else prefer constructor injection.
 
@@ -357,6 +357,16 @@ final class FeedViewAdapter: ResourceView {
     private let selection: (FeedImage) -> Void
     private let currentFeed: [FeedImage: CellController]
 
+    init(currentFeed: [FeedImage: CellController] = [:],
+         controller: ListViewController,
+         imageLoader: @escaping (URL) async throws -> Data,
+         selection: @escaping (FeedImage) -> Void) {
+        self.currentFeed = currentFeed
+        self.controller = controller
+        self.imageLoader = imageLoader
+        self.selection = selection
+    }
+
     func display(_ viewModel: Paginated<FeedImage>) {
         guard let controller = controller else { return }
 
@@ -518,7 +528,7 @@ UITableView renders cells
 
 ## Guardrails
 
-- Do not use bare `Task { }` in adapters — use `Task.immediate` for synchronous-first execution
+- Prefer `Task.immediate` over bare `Task { }` in adapters for synchronous-first execution — noting its availability floor (iOS 26+, no back-deployment); on earlier targets use plain `Task` and test via observable state (see `concurrency-at-boundaries.md`)
 - Do not skip `Task.isCancelled` checks after `await` — stale results must not reach the presenter
 - Do not create adapters, composites, decorators or proxies outside the Composition Root — they are wiring code, not business logic
 - Do not hold strong references from presenter to view — always use `WeakRefVirtualProxy` (UIKit)

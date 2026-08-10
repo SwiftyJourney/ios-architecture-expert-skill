@@ -50,7 +50,7 @@ Three consequences follow from "no other module references it", and they are all
 2. **`@testable import` is legitimate *here specifically*.** The no-`@testable` rule exists to stop
    tests coupling to a module's internals; a root module has no external clients whose contract
    could rot. Everywhere else, a test that needs `@testable` is a missing public seam — see
-   `testing-strategy.md`.
+   `testability-and-seams.md`.
 3. **Feature modules must never depend on the Composition Root.** That is the anti-pattern that
    creates circular dependencies and exposes every module to every other. If a feature needs
    something from the root, invert it: pass a closure in.
@@ -551,7 +551,7 @@ final class DebuggingSceneDelegate: SceneDelegate {
 
 **Why**: the production `SceneDelegate` stays free of test/debug concerns (it just exposes overridable factory seams like `makeRemoteClient()`); the `#if DEBUG` guard guarantees none of this is in the release binary; and the launch-argument/`UserDefaults` flags (`-reset`, `connectivity`) let an out-of-process UI test drive app state. The same shape generalizes to any debug-only feature — isolate it in a `#if DEBUG` type, don't litter production with directives.
 
-> For **acceptance tests specifically**, prefer the in-process `convenience init(httpClient:store:)` seam above over launch-argument hooks — it's faster and needs no debug subclass (the case study ultimately deleted its UI-test target in favor of in-process tests; see `testing-strategy.md`). The `#if DEBUG`-isolated-subclass technique remains the correct way to keep *genuinely* debug-only code (debug menus, simulator seams) out of release.
+> For **acceptance tests specifically**, prefer the in-process `convenience init(httpClient:store:)` seam above over launch-argument hooks — it's faster and needs no debug subclass (the case study ultimately deleted its UI-test target in favor of in-process tests; see `testability-and-seams.md`). The `#if DEBUG`-isolated-subclass technique remains the correct way to keep *genuinely* debug-only code (debug menus, simulator seams) out of release.
 
 ---
 
@@ -613,13 +613,15 @@ struct FeedUIComposer {
 
 In SwiftUI, `@Observable` replaces the adapter->proxy->presenter chain. The view model directly holds loading/error/success state and SwiftUI observes mutations automatically. No `WeakRefVirtualProxy` needed — SwiftUI manages view lifecycle.
 
+Full SwiftUI composition coverage — `@main App` as the Composition Root, environment DI, routing at the root, acceptance seams — lives in [swiftui-composition.md](swiftui-composition.md).
+
 ---
 
 ## Guardrails
 
 - Do not create concrete types inside feature modules — all instantiation belongs in the Composition Root
-- Do not use singletons — `lazy var` in `FeedService` achieves deferred init without global state
-- Do not skip the fallback — always handle CoreData initialization failure with `InMemoryFeedStore`
+- Do not reach for a singleton by default — the composer decides lifetimes (`lazy var` in `FeedService` achieves deferred init without global state). A singleton is justified only when a single instance is genuinely required and it holds no mutable app state (see `dependency-management.md`)
+- Do not ignore store initialization failure — handle it deliberately. An in-memory fallback (degraded-but-working) and a Null Object (do-nothing) are both valid; pick per product decision and log either way (see `adapters-and-proxies.md` on Null Objects)
 - Do not use `DispatchQueue.main.async` in composition — use `@MainActor` annotation instead
 - Do not embed navigation logic in view controllers — use closure callbacks wired in the Composition Root
 - Do not scatter `#if DEBUG` branches through the production composition — isolate debug/test-only code in a `#if DEBUG`-guarded `SceneDelegate` subclass selected via `configuration.delegateClass`, so it never ships in release
@@ -628,8 +630,8 @@ In SwiftUI, `@Observable` replaces the adapter->proxy->presenter chain. The view
 
 - [ ] `FeedService` is `@MainActor` and uses `lazy var` for all dependencies
 - [ ] Store type is constrained as `FeedStore & FeedImageDataStore & Scheduler & Sendable`
-- [ ] CoreData initialization failure falls back to `InMemoryFeedStore`
+- [ ] Store initialization failure is handled deliberately — in-memory fallback or Null Object, logged either way
 - [ ] `convenience init` exists for test injection on both `FeedService` and `SceneDelegate`
-- [ ] `validateCache()` uses `Task.immediate` (not bare `Task`)
+- [ ] `validateCache()` uses `Task.immediate` (not bare `Task`) on iOS 26+ targets — see `concurrency-at-boundaries.md` for the earlier-target fallback
 - [ ] Pagination `loadMore` closure is annotated `@MainActor @Sendable`
 - [ ] All `Scheduler.schedule` calls capture `[store]` (not `[self]`)
