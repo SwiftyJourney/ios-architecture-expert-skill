@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-weak-proxy-blank-feed
+expected_outcome: |
+  Diagnoses that FeedViewAdapter is owned only by the presenter, so wrapping it in a weak proxy deallocates it immediately and the feed never renders. The rule: weakly proxy only the reference that closes a cycle back to the presenter (controller -> adapter -> presenter -> controller); anything owned only by the presenter stays strong. Memory policy is the composer's decision.

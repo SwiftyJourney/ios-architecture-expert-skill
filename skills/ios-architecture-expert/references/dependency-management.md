@@ -106,7 +106,8 @@ was a function.*
 ## The four levels of dependency evolution
 
 How a shared API client typically evolves. Useful both as a diagnosis ("we're at level 2") and as a
-roadmap.
+roadmap — but it is an informal progression the course numbered for its slides, not an established
+taxonomy, so don't present the levels to users as a named model.
 
 | Level | Shape | Problem it still has |
 |---|---|---|
@@ -137,6 +138,14 @@ features, not about how requests are made. Details should depend on features.
 
 **Prefer constructor injection**, because it guarantees a component has access to its dependencies at
 all times. A presenter's view reference should not be optional — a presenter must have a view.
+
+**What never changes goes in the initializer; what changes over time arrives later.** Data fixed for
+a component's lifetime (a cell's description and location) is a constructor parameter — a mapped
+view model. State that changes (the async image, loading, error) arrives through `display(_:)`, a
+property or a method (007/002). The same applies to callbacks: a selection handler that never
+changes is constructor-injected as a closure rather than added as a new method on a delegate
+protocol, which would grow the protocol for every conformer — "otherwise you end up with the
+`UITableViewDelegate` protocol with 300 methods" (007/004).
 
 Method injection has a second, less obvious use: **it removes impurity**. Instead of injecting a
 `() -> Date` closure into a policy (making it non-deterministic), pass the `Date` itself:

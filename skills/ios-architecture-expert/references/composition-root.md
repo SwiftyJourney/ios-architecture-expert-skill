@@ -105,10 +105,16 @@ objects carry their own complexity; introducing them without the navigation comp
 justifies them is a net loss. When you do add them, they live in the Composition Root (or in
 modules), never inside features — otherwise you have re-coupled the features you just separated.
 
-For simple transitions, pushing a view controller directly is fine — presenting an alert, or a
-child screen whose data you already hold. It stops being fine when the destination needs a
-non-trivial object graph: then the source screen would have to know every dependency of the
-destination. Route the selection out as a closure and let the root compose the destination:
+**When in doubt, go simple** (007/004). Pushing a view controller directly is fine — presenting
+an alert, or a child screen whose data you already hold and which needs no loaders or services —
+and it stays fully testable. Route the selection out as a closure and let the root compose the
+destination only when one of two triggers applies:
+
+1. **The destination needs a non-trivial object graph** (loaders, services, stores). Otherwise the
+   source screen would have to know every dependency of the destination.
+2. **The source is a generic, reusable controller** (a `ListViewController` shared by several
+   features). Segue identifiers or `if/else` chains there mean every new feature edits the shared
+   controller — an OCP violation.
 
 ```swift
 // The list knows only that something was selected. The root knows what that means.
@@ -165,7 +171,7 @@ final class FeedService {
 ```
 
 **Key principles**:
-- `lazy` properties defer creation and allow override in tests via `convenience init`
+- `lazy` properties defer creation and allow override in tests via `convenience init`. "Deferred" means *until first access*, and capture lists count: a closure built at launch with `[httpClient, store]` reads both right there, so the store opens at launch. Describe a `lazy` dependency's timing by tracing where it is first touched, not by the keyword
 - Protocol composition (`FeedStore & FeedImageDataStore & Scheduler & Sendable`) constrains the store type at the wiring site
 - Fallback pattern: CoreData -> InMemory on failure
 - `@MainActor` ensures all composition happens on the main thread
@@ -242,11 +248,18 @@ private func loadRemoteFeed(after: FeedImage? = nil) async throws -> [FeedImage]
 }
 ```
 
+Every `schedule` closure captures `[store]` (and `[store, logger]` in `validateCache`) rather than
+reading `self.store`. The reason is the *state*, not `self`: a `@MainActor` class is implicitly
+`Sendable`, so capturing `self` in a `@Sendable` closure is legal (`makePage` below does exactly
+that). What fails is touching main-actor-isolated state — the `lazy var store`/`logger` — from the
+non-isolated closure body. The capture list copies those values on the main actor before the
+closure runs.
+
 `try? loader.save(feed)` is fire-and-forget by design — the customer still sees the feed if caching fails. Cache-on-success is a Composition Root concern: historically an explicit Decorator with a narrow save-only `FeedCache` protocol owned by the feature module.
 
 ### Parallel loading with `async let`
 
-Zipping the cache load with the remote page exists so accumulated items are **not** held in closure memory — the cache is the single source of truth for previous pages. Reduced latency is a side benefit, not the motivation:
+The case study re-reads the previous pages from the cache and zips them with the new remote page. Treat that as an **optional, measured memory optimisation**, not a rule: the simple default is to accumulate items in memory (pass the previous page's items into the next `loadMore` closure), which is faster but grows with the collection. Re-reading from the cache saves memory on very large feeds — "measure before optimizing" (007/005). It also makes the cache the source of truth for what is on screen: if the cache expired (validation deleted it) or the last save failed, the re-read returns fewer items than are displayed and the next page silently drops the earlier ones. Whoever proposes it states that risk. The `async let` itself is there only because the two loads are independent and can run concurrently (008/005):
 
 ```swift
 private func loadMoreRemoteFeed(last: FeedImage?) async throws -> Paginated<FeedImage> {
@@ -507,12 +520,15 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
 ```
 
 **Key techniques**:
+- The **container is a composition decision**. The root wraps the feed in a `UINavigationController`; the feature's view controller (or storyboard) never embeds itself in a navigation controller or tab bar, so it can be pushed, placed in a tab or presented modally as each composition needs (005/008). The root's tests assert that shape — `SceneDelegateTests` checks for a navigation controller root with the feed `ListViewController` as `topViewController`
 - `convenience init` accepts protocol-composed dependencies for acceptance test injection
 - `sceneWillResignActive` triggers cache validation (fire-and-forget via `Task.immediate`)
 - Navigation closures (`showComments`) keep view controllers decoupled from loading logic
 - `lazy` properties ensure composition happens once, on first access
 
 ### Debug-only code: the `#if DEBUG` subclass pattern
+
+> **History, not the final code.** The snippet below is the 2019 version of the case study (`ae23a66`), removed in `c9bd0a5` when the UI-test target was replaced by in-process acceptance tests. `DebuggingSceneDelegate` and `makeRemoteClient()` do not exist in the final code. It is kept as a worked example of isolating debug-only code; for acceptance tests use the `convenience init` seam above.
 
 When you legitimately need debug/test-only behavior in the composition root — a debug menu, a simulator-only seam, canned responses for UI tests — **do not scatter `#if DEBUG` branches through the production `SceneDelegate`.** Extract it into a `#if DEBUG`-guarded *subclass* that overrides the production composition's factory seams, and select that subclass only in debug builds. Release builds never compile, reference, or ship the debug code.
 
@@ -549,7 +565,7 @@ final class DebuggingSceneDelegate: SceneDelegate {
 #endif
 ```
 
-**Why**: the production `SceneDelegate` stays free of test/debug concerns (it just exposes overridable factory seams like `makeRemoteClient()`); the `#if DEBUG` guard guarantees none of this is in the release binary; and the launch-argument/`UserDefaults` flags (`-reset`, `connectivity`) let an out-of-process UI test drive app state. The same shape generalizes to any debug-only feature — isolate it in a `#if DEBUG` type, don't litter production with directives.
+**Why**: the production `SceneDelegate` stays free of test/debug concerns (it just exposes overridable factory seams like `makeRemoteClient()`); the `#if DEBUG` guard guarantees none of this is in the release binary; and the launch-argument/`UserDefaults` flags (`-reset`, `connectivity`) let an out-of-process UI test drive app state. Those flags are also an attack surface — anyone can launch the app with arguments and take control of its state (006/005) — so the `#if DEBUG` guard that strips them from release is the minimum safeguard; if UI tests must run against a release-like build, gate the hooks behind a dedicated custom flag (e.g. `TESTING`), never the plain release configuration. The same shape generalizes to any debug-only feature — isolate it in a `#if DEBUG` type, don't litter production with directives.
 
 > For **acceptance tests specifically**, prefer the in-process `convenience init(httpClient:store:)` seam above over launch-argument hooks — it's faster and needs no debug subclass (the case study ultimately deleted its UI-test target in favor of in-process tests; see `testability-and-seams.md`). The `#if DEBUG`-isolated-subclass technique remains the correct way to keep *genuinely* debug-only code (debug menus, simulator seams) out of release.
 
@@ -605,7 +621,7 @@ struct FeedUIComposer {
     ) -> some View {
         let viewModel = FeedViewModel(loader: feedLoader, imageLoader: imageLoader)
 
-        FeedView(viewModel: viewModel, selection: selection)
+        return FeedView(viewModel: viewModel, selection: selection)
             .task { await viewModel.load() }
     }
 }
@@ -623,7 +639,8 @@ Full SwiftUI composition coverage — `@main App` as the Composition Root, envir
 - Do not reach for a singleton by default — the composer decides lifetimes (`lazy var` in `FeedService` achieves deferred init without global state). A singleton is justified only when a single instance is genuinely required and it holds no mutable app state (see `dependency-management.md`)
 - Do not ignore store initialization failure — handle it deliberately. An in-memory fallback (degraded-but-working) and a Null Object (do-nothing) are both valid; pick per product decision and log either way (see `adapters-and-proxies.md` on Null Objects)
 - Do not use `DispatchQueue.main.async` in composition — use `@MainActor` annotation instead
-- Do not embed navigation logic in view controllers — use closure callbacks wired in the Composition Root
+- Do not navigate from a view controller when the destination needs a non-trivial object graph or the source is a generic/reusable controller — route a selection closure to the Composition Root. A simple push or alert with data already in hand may stay in the controller ("when in doubt, go simple")
+- Do not let a feature's view controller or storyboard embed its own navigation controller or tab bar — the composition picks the container, and the root's tests assert it
 - Do not scatter `#if DEBUG` branches through the production composition — isolate debug/test-only code in a `#if DEBUG`-guarded `SceneDelegate` subclass selected via `configuration.delegateClass`, so it never ships in release
 
 ## Verification
@@ -634,4 +651,4 @@ Full SwiftUI composition coverage — `@main App` as the Composition Root, envir
 - [ ] `convenience init` exists for test injection on both `FeedService` and `SceneDelegate`
 - [ ] `validateCache()` uses `Task.immediate` (not bare `Task`) on iOS 26+ targets — see `concurrency-at-boundaries.md` for the earlier-target fallback
 - [ ] Pagination `loadMore` closure is annotated `@MainActor @Sendable`
-- [ ] All `Scheduler.schedule` calls capture `[store]` (not `[self]`)
+- [ ] `Scheduler.schedule` closures capture the values they use (`[store]`, `[store, logger]`) instead of reading main-actor-isolated `self.store`/`self.logger` from the non-isolated closure (capturing `self` itself is legal — the class is `@MainActor`, hence `Sendable`)

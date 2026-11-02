@@ -22,6 +22,13 @@ Jump to:
 - [UI Layer — UIKit](#ui-layer--uikit)
 - [UI Layer — SwiftUI](#ui-layer--swiftui-equivalent)
 
+> **"Foundation only" is a per-layer import rule, not a description of the case study's modules.**
+> In the case study, Feature, API, Cache and Presentation are *folders* inside one
+> `EssentialFeed.framework` that also holds the CoreData and URLSession infrastructure — UI-free,
+> not Foundation-only — next to `EssentialFeediOS` (UIKit) and `EssentialApp`. One SPM target per
+> layer (`spm-project-structure.md`) is this skill's stricter recommendation. The code below is a
+> worked example: map the names onto your own types.
+
 ---
 
 ## Three kinds of logic — the framing
@@ -78,10 +85,11 @@ better, inject your own session and never touch the shared one.
 
 ## Feature Layer (Foundation only)
 
-Domain models are value types. Use-case contracts are protocols. No framework imports.
+Domain models are value types. Boundaries are function types or, when earned, protocols. No framework imports.
 
 ```swift
-// Domain model — struct, Hashable, Sendable
+// Domain model — struct, Sendable, and Equatable or Hashable
+// (FeedImage is Hashable; ImageComment is only Equatable, Sendable — Hashable only when needed)
 public struct FeedImage: Hashable, Sendable {
     public let id: UUID
     public let description: String?
@@ -89,37 +97,30 @@ public struct FeedImage: Hashable, Sendable {
     public let url: URL
 }
 
-// Use-case protocol — cache boundary
-public protocol FeedCache {
-    func save(_ feed: [FeedImage]) throws
-}
-
-// Use-case protocol — data loading boundary
-public protocol FeedImageDataLoader {
-    func loadImageData(from url: URL) throws -> Data
-}
-
-// Use-case protocol — data caching boundary
-public protocol FeedImageDataCache {
-    func save(_ data: Data, for url: URL) throws
-}
-
-// Store protocol — image data persistence
+// Store protocol — image data persistence (several cohesive methods, two real
+// implementations: CoreData + InMemory)
 public protocol FeedImageDataStore {
     func insert(_ data: Data, for url: URL) throws
     func retrieve(dataForURL url: URL) throws -> Data?
 }
 ```
 
-**Rules**: Models own no behavior. Protocols define single-responsibility boundaries. Each protocol maps to one use case.
+**Rules**: Data models (`FeedImage`) carry no behavior; business models and policies
+(`FeedCachePolicy`) carry app-agnostic rules but no side effects and no state. A single-method
+boundary is a function type unless it earns a protocol (below).
 
-> **Why do these single-method protocols exist when the API layer forbids `FeedLoader`?** A
-> protocol earns its place when there are multiple implementations/strategies to select between, or
-> when the boundary needs interception — composite, decorator, fallback all require a named
-> abstraction to wrap. `FeedCache`, `FeedImageDataLoader` and `FeedImageDataCache` each have both:
-> real alternative implementations and decorator/fallback compositions at the root. A closure
-> suffices when there is exactly one implementation and no interception need — which is why
-> `FeedLoader` was deleted but `FeedCache` stays.
+> **When does a boundary earn a protocol?** Not by counting strategies. A single-method boundary
+> defaults to a function type (`() async throws -> R`) even with several implementations, because
+> closures compose fallback, decoration and interception with plain code. Keep a protocol when the
+> boundary has **several cohesive methods** (`FeedStore`, `FeedImageDataStore`), when a **named
+> contract** matters to implementers (shared contract specs, external clients — `HTTPClient` is
+> arguable but kept as the decorator/test-stub seam), or when **type-level conformance** carries
+> meaning (`ResourceView` with its `associatedtype`). History: `FeedLoader` had remote, local and a
+> fallback composite, and was still deleted (commit `fa5568b`) because Combine's universal
+> abstractions made the named single-method protocol redundant. `FeedCache`,
+> `FeedImageDataLoader` and `FeedImageDataCache` survive in the final code with one conformer each
+> and no consumer — leftovers, not exemplars; `FeedService` calls the concrete `LocalFeedLoader`
+> and `LocalFeedImageDataLoader` directly.
 
 > **Infrastructure interfaces should be dumb.** `HTTPClient` and `FeedStore` exist only to fulfil
 > commands sent by a controller type through the boundary — "fetch something from the cache",
@@ -159,9 +160,17 @@ public enum FeedEndpoint {
 }
 ```
 
+- **Endpoint shape is a trade-off.** Adding a case or an associated value to an endpoint `enum`
+  breaks every switch and call site — fine while only the Composition Root uses it. For a public or
+  frequently changing endpoint API, prefer a struct with static factory methods. Model a cursor as
+  an optional associated value (`get(after:)`), not a new case.
+- **`components.url!` is deliberate here.** Building from a static, in-app base URL can only fail
+  through a programmer error, so crash early and let tests catch it. In a public library, or from
+  external input, return an optional and make callers handle it.
+
 ```swift
-// Static mapper — caseless enum (uninstantiable namespace), private Decodable types,
-// public static function
+// Static mapper — the case study declares it `public final class FeedItemsMapper` with only
+// static members. This skill recommends a caseless enum (an uninstantiable namespace) instead.
 public enum FeedItemsMapper {
     private struct Root: Decodable {
         private let items: [RemoteFeedItem]
@@ -200,7 +209,7 @@ public protocol HTTPClient {
 }
 ```
 
-**Rules**: Mappers are caseless `enum`s with `static` methods — a caseless enum cannot be instantiated, so it needs no private `init` (see `design-principles.md` on stateless namespaces). Decodable types are `private`. Errors are typed enums. `HTTPClient` is a protocol, not `URLSession` directly.
+**Rules**: Mappers expose only `static` methods. The skill's recommendation is a caseless `enum` — it cannot be instantiated, so it needs no private `init` (see `design-principles.md` on stateless namespaces); the case study's `public final class` mappers work the same but can be instantiated. Decodable types are `private`. Errors are typed enums. `HTTPClient` is a protocol, not `URLSession` directly.
 
 - **Status-code contracts are per endpoint.** The feed mapper accepts exactly `200`; the image-comments mapper accepts any `2xx` (`(200...299).contains(...)`). Assert the exact accepted range per mapper — do not share one `isOK`.
 - **Pagination is keyset-based** (a.k.a. the seek method), not limit/offset: `after_id=<last item's id>`.
@@ -256,7 +265,7 @@ public final class LocalFeedLoader {
     }
 }
 
-extension LocalFeedLoader: FeedCache {
+extension LocalFeedLoader: FeedCache {   // conformance exists in the source; nothing consumes it
     public func save(_ feed: [FeedImage]) throws {
         try store.deleteCachedFeed()
         try store.insert(feed.toLocal(), timestamp: currentDate())
@@ -461,11 +470,9 @@ public final class ListViewController: UITableViewController,
             snapshot.appendSections([section])
             snapshot.appendItems(cellControllers, toSection: section)
         }
-        // Guard avoids redundant reloads; applySnapshotUsingReloadData (not animated apply)
-        // sidesteps diffable's reconfigure/animation pitfalls with custom cells.
-        if snapshot.itemIdentifiers != dataSource.snapshot().itemIdentifiers {
-            dataSource.applySnapshotUsingReloadData(snapshot)
-        }
+        // Animated diff: only changed items are updated. (applySnapshotUsingReloadData was
+        // replaced by apply in commit 0fbdd1a.)
+        dataSource.apply(snapshot)
     }
 
     // Diffable only reloads CHANGED items, so it won't reflow on a Dynamic Type change —
@@ -504,7 +511,7 @@ For SwiftUI specifics (state management, view composition, `@Observable` pattern
 ## Guardrails
 
 - Do not import UIKit/SwiftUI in Feature, API, Cache, or Presentation layers — Foundation only
-- Do not use `class` for domain models — use `struct` with `Hashable` and `Sendable`
+- Do not use `class` for domain models — use `struct` with `Sendable` and `Equatable` (`Hashable` when it is used as an identity or diffable key)
 - Do not embed cache policy in the loader — keep it as a separate type with `static` methods
 - Do not leak `Decodable` types beyond the mapper — keep them `private`
 - Do not add `@MainActor` to domain models or store protocols — isolation is decided at the composition level
@@ -512,8 +519,8 @@ For SwiftUI specifics (state management, view composition, `@Observable` pattern
 ## Verification
 
 - [ ] Feature layer has zero framework imports beyond Foundation
-- [ ] All domain models are `struct`, `Hashable`, `Sendable`
-- [ ] No layer references a concrete type from another layer — every boundary is a protocol (multiple strategies) or a composed closure (one)
+- [ ] All domain models are `struct`, `Sendable`, and `Equatable` or `Hashable`
+- [ ] No layer references a concrete type from another layer — every boundary is a function type (single method) or a protocol (several cohesive methods, a named contract, or meaningful conformance)
 - [ ] View protocols (`ResourceView`, `ResourceLoadingView`, `ResourceErrorView`) are `@MainActor`
 - [ ] Mapper Decodable types are `private`
 - [ ] `LocalFeedImage` is decoupled from `FeedImage` (separate type)

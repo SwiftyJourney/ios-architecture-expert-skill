@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-greenfield-bookmarks-feature
+expected_outcome: |
+  A multi-module feature design: a framework-free Bookmarks core (domain model as Sendable struct, use-case protocols, API mapper behind an HTTPClient protocol, store protocol + cache policy, presenter producing plain view-model structs), a separate UIKit layer, and a Composition Root (composer/static factory in the app target) where ALL concrete instantiation and wiring happens. Concurrency annotations confined to boundaries: @MainActor on presentation/UI/composition only, Sendable models, no @unchecked Sendable. It keeps the deployment target the user implied (Swift 6 + SPM, no iOS 26 requirement unless justified as optional) and the offline fallback is correct: network first, cache on success, cached list on failure, error when nothing was ever cached.

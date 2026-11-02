@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-singleton-taxonomy-and-extraction
+expected_outcome: |
+  An answer that refuses the blanket rule and distinguishes the three cases: AnalyticsManager is a genuine Singleton and may be fine; APIClient.shared as a `static var` is mutable global state rather than a singleton and is the real problem; URLSession.shared is a shared instance whose issue is that view controllers reach for it directly. The fix is not deleting singletons but removing direct access -- inject an abstraction and move creation to the composition root -- shown as an incremental, test-backed sequence. The code shown is focused on the API client refactor the user asked for.

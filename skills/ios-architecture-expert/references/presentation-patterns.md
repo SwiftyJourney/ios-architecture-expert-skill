@@ -149,12 +149,13 @@ typealias Observer<T> = (T) -> Void   // naming the type is the documentation
 ```swift
 @MainActor
 final class FeedViewModel {
-    private enum State { case pending, loading, loaded([FeedImage]), failed }
+    private enum State { case pending, loading, loaded, failed }
     private var state: State = .pending { didSet { onChange?(self) } }
+    private(set) var feed: [FeedImage] = []   // survives a failed reload
 
     var onChange: Observer<FeedViewModel>?
-    var isLoading: Bool { if case .loading = state { return true }; return false }
-    var feed: [FeedImage]? { if case let .loaded(feed) = state { return feed }; return nil }
+    var isLoading: Bool { state == .loading }
+    var didFail: Bool { state == .failed }
 
     private let loadFeed: () async throws -> [FeedImage]
 
@@ -164,11 +165,19 @@ final class FeedViewModel {
 
     func load() async {
         state = .loading
-        do { state = .loaded(try await loadFeed()) }
-        catch { state = .failed }
+        do { feed = try await loadFeed(); state = .loaded }
+        catch { state = .failed }   // error is an extra state; `feed` is untouched
     }
 }
 ```
+
+> **A failed reload keeps what is already on screen.** The error is an *extra* state shown next to
+> the content, the loading indicator stops on both success and failure, and the resource is never
+> reset to empty on error — "it should not alter the current rendering state on error" (005/004).
+> The classic bug is a `.loaded(items)` / `.failed` enum whose `feed` becomes `nil` on failure: a
+> binder rendering `vm.feed ?? []` wipes the list on every refresh error. The same applies to a
+> SwiftUI `state = .failed`. `LoadResourcePresenter.didFinishLoading(with: Error)` gets this right
+> by never calling `resourceView.display`.
 
 **Stateless** — the view model holds only *transient* state: one observer per thing that can
 change, and the transition is passed directly through the closure:
@@ -390,13 +399,24 @@ When an MVP diagram looks complicated, mentally delete the composer and its adap
 > able to refactor from one pattern to the other, and to couple, decouple, compose and decompose
 > your UI and presentation layers as needed.
 
-Practical guidance:
+**Start from the clients, not the acronym.** Who renders this presentation logic decides the
+pattern:
+
+- **Any client is SwiftUI (including watchOS)** → an `@Observable @MainActor` view model per
+  platform, sitting on a Foundation-only presentation mapper (pure functions + strings) that all
+  platforms share. SwiftUI binds to observable state; forcing it through view protocols and proxies
+  adds wiring it does not need (see `swiftui-composition.md`).
+- **Every client is imperative (UIKit/AppKit)** → MVP with view protocols + presentation adapter +
+  `WeakRefVirtualProxy` is the default.
+
+Within that, practical guidance:
 
 | Situation | Reach for |
 |---|---|
 | One platform, no duplication across screens, little formatting | **MVC** — and split into tiny MVCs as it grows |
 | Value transformation or logic duplicated across controllers | **MVVM** — extract a platform-agnostic view model |
-| Presentation logic must be reused across platforms, or you want the view fully passive and snapshot/unit testable | **MVP** — abstract view protocols in the presentation layer |
+| Presentation logic reused across imperative clients, or you want the view fully passive and snapshot/unit testable | **MVP** — abstract view protocols in the presentation layer |
+| SwiftUI clients alongside (or instead of) UIKit | **Shared mapper + `@Observable` view model per platform** |
 | Several features share the same loading/error/success shape | Generic `LoadResourcePresenter` — see below |
 
 Notes that keep this honest:
@@ -430,8 +450,19 @@ it a view-model property the presenter sets per state (and, following ISP, poten
 The **UI module is passive**: it makes no presentation decisions, it renders what it is given.
 That is what makes it easy to develop, test, reuse and replace.
 
-> Localization mechanics — keys vs default values, per-feature `.strings` tables, and why you
-> assert keys rather than translations — belong to the testing skill.
+**Each module owns its strings.** Two production conventions (005/009): a key is never its own
+default value (`FEED_VIEW_TITLE`, not `"My Feed"`), and each feature gets its own table in its
+presentation module, loaded from that module's bundle. Ownership follows from that (007/002):
+
+- **Several modules depending on the same key is a red flag.** Move shared copy (the generic
+  connection error) into the shared presentation module's own table (`Shared.strings`).
+- **Expose strings as public statics** (`FeedPresenter.title`, `LoadResourcePresenter.loadError`)
+  so composers and integration tests never hard-code keys or table names.
+- **White-label apps** reusing the same modules with different copy: move the strings into each
+  app's Composition Root and inject them — every app instance has its own root and its own table.
+
+> Asserting keys rather than translations, and the localization test helpers, belong to the
+> testing skill.
 
 ---
 
@@ -447,7 +478,14 @@ here.
 3. **Feature-specific presenter (MVP).** `FeedPresenter` + `FeedView`/`FeedLoadingView`/
    `FeedErrorView`, with a composer wiring adapter → presenter → view.
 4. **Second feature arrives.** Duplicate it. Only now is the shape of the abstraction visible.
-5. **Generalize.** The three loading states — start loading, finish with resource, finish with
+5. **Split combined view models by concern.** A view model mixing static details with loading
+   state (`FeedImageViewModel { description, location, isLoading, shouldRetry, image }`) blocks
+   reuse. Split it into a details-only view model plus the separate loading, error and resource
+   states (`ResourceLoadingView`, `ResourceErrorView`, `ResourceView` displaying the image) — "we
+   split the centralized state into different states, which makes our code more composable"
+   (007/002). Only then can a per-cell async resource plug into the same generic presenter as the
+   list.
+6. **Generalize.** The three loading states — start loading, finish with resource, finish with
    error — are identical for every resource, including images. Rename away the feature vocabulary
    (`FeedView` → `ResourceView`, `didStartLoadingFeed` → `didStartLoading`), strip feature-specific
    state (the `title` belongs to each feature, not to the generic presenter), and introduce the one
@@ -456,6 +494,11 @@ here.
 ```swift
 public typealias Mapper = (Resource) throws -> View.ResourceViewModel
 ```
+
+What varies per feature stays out of the generic types entirely: a shared list or presenter
+takes no feature flags (`showsLoadMore`, `isPaginated`) — per-feature behaviour is injected as
+content by whoever composes it (see `adapters-and-proxies.md`, load-more as another
+`CellController`).
 
 > Make it **concrete before you make it generic**. Do the rename-and-strip refactor with a
 > placeholder type first, get green, commit — *then* introduce the generic parameters. Doing both
@@ -499,6 +542,9 @@ lives in [swiftui-composition.md](swiftui-composition.md).
 - Do not use property injection outside composition components
 - Do not build a generic presenter for one feature — duplicate first, generalize on the second
 - Do not let a view read a presenter's static string directly — the composer assigns it
+- Do not reset content to empty when a reload fails — show the error as an extra state and stop loading on both paths
+- Do not pick a pattern by acronym — pick by the clients (any SwiftUI client → `@Observable` view model over a shared mapper; all-imperative → MVP)
+- Do not share one strings table across feature modules — shared copy goes in the shared presentation table
 
 ## Verification
 
@@ -509,3 +555,4 @@ lives in [swiftui-composition.md](swiftui-composition.md).
 - [ ] No controller both creates and uses a collaborator it only needs in order to build another
 - [ ] Locale/date/calendar dependencies in presenters are injected with defaults
 - [ ] Generic presentation types have at least two real clients
+- [ ] A failed reload leaves previously rendered content in place (there is a test for it)

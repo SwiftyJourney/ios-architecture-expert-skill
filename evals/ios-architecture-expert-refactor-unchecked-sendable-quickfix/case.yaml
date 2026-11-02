@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-refactor-unchecked-sendable-quickfix
+expected_outcome: |
+  Respects 'quick fix, we ship Friday' while staying correct: @unchecked Sendable is replaced by real isolation (@MainActor), the background network callback is made safe (e.g. @Sendable callback hopping to the main actor), public API and call sites stay stable, and the architectural problems (singletons, UIImage in the view model, navigation in the VC, inline freshness rule, completion handlers) are listed as prioritized follow-ups rather than done now.

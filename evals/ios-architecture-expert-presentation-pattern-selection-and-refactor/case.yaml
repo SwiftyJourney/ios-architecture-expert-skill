@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-presentation-pattern-selection-and-refactor
+expected_outcome: |
+  A recommendation driven by the clients: because one client (watchOS) is SwiftUI, shared Foundation-only presentation logic (formatting, state mapping, strings) plus an @Observable view model for SwiftUI; the UIKit controller becomes passive. Navigation and ProfileService creation move to a composition site. Proportionate to one screen, and it keeps the user's deployment targets.

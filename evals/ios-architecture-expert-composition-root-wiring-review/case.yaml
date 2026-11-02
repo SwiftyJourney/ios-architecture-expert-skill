@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-composition-root-wiring-review
+expected_outcome: |
+  A review naming: duplicated infrastructure must become single lazy instances with lifetimes decided by the composer; per-screen store defeats caching and must be shared; a view controller invoking the composer is a module depending on the Composition Root (inverted arrow) -- navigation must be composed in the root via a selection closure; and store-initialization failure needs a deliberate strategy (in-memory fallback or Null Object, logged) rather than a crash. Proportionate to the four issues, and the selection closure does not create a retain cycle.

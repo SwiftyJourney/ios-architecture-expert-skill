@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-generic-list-pagination
+expected_outcome: |
+  Rejects pagination flags and append/dedup logic in the generic list (Open/Closed). Load-more becomes another CellController in its own section, configured by whoever composes the Feed screen. A Paginated<Item> page carries all items loaded so far plus an optional loadMore closure (nil on the last page), built at the composition layer with the cursor from the last item of the new page; the UI just renders and calls loadMore and is agnostic of keyset vs offset. The cache stays unaware of pagination. Includes loading/error-with-retry for the load-more cell.

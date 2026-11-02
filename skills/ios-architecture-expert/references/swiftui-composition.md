@@ -57,48 +57,51 @@ final class AppComposer {
     // A plain class, deliberately NOT @Observable: no view observes the composer, and
     // @Observable rejects `lazy` stored properties anyway. @State just holds it.
 
-    // Infrastructure — created once, lazily, exactly like the SceneDelegate's lazy vars
-    private lazy var httpClient: HTTPClient = URLSessionHTTPClient(
-        session: URLSession(configuration: .ephemeral)
-    )
-
-    private static let storeURL = URL.applicationSupportDirectory.appending(path: "feed-store.sqlite")
-
-    private lazy var store: FeedStore & FeedImageDataStore = {
-        do {
-            return try CoreDataFeedStore(storeURL: Self.storeURL)
-        } catch {
-            // in-memory fallback vs Null Object is a product decision — log either way
-            return InMemoryFeedStore()
-        }
-    }()
-
-    private lazy var feedService = FeedService(store: store, httpClient: httpClient)
+    // The same FeedService the SceneDelegate uses — it owns the lazy httpClient/store
+    // and the CoreData → InMemory fallback internally.
+    private lazy var feedService = FeedService()
 
     private var navigation = NavigationModel()
+
+    // Test injection — the same seam as SceneDelegate.init(httpClient:store:)
+    convenience init(httpClient: HTTPClient,
+                     store: FeedStore & FeedImageDataStore & Scheduler & Sendable) {
+        self.init()
+        self.feedService = FeedService(httpClient: httpClient, store: store)
+    }
 
     func makeRootView() -> some View {
         NavigationRootView(navigation: navigation, composer: self)
     }
 
-    func makeFeedView() -> some View {
-        let model = FeedViewModel(
-            loadFeed: feedService.loadFeed,
-            onSelect: { [navigation] image in navigation.path.append(.comments(for: image)) }
+    func makeFeedViewModel() -> FeedViewModel {
+        FeedViewModel(
+            loadFeed: feedService.loadRemoteFeedWithLocalFallback,
+            onSelect: { [navigation] image in navigation.path.append(.comments(for: image)) },
+            // The case study's shared string is a static on the generic LoadResourcePresenter
+            // ("GENERIC_CONNECTION_ERROR" in the "Shared" table). A SwiftUI app with no
+            // ResourceView conformer is better served by a non-generic accessor in the shared
+            // presentation module, e.g. `SharedStrings.loadError`.
+            loadErrorMessage: SharedStrings.loadError
         )
-        return FeedView(model: model)
+    }
+
+    func makeFeedView() -> some View {
+        FeedView(model: makeFeedViewModel())
     }
 
     func makeCommentsView(for image: FeedImage) -> some View {
         CommentsView(model: CommentsViewModel(
-            loadComments: feedService.makeCommentsLoader(for: image)
+            loadComments: feedService.loadComments(for: image)
         ))
     }
 }
 ```
 
-What did *not* change from `composition-root.md`: `FeedService` (the `@MainActor` orchestrator),
-the store fallback decision, the remote-with-local-fallback strategies, logging from the root.
+What did *not* change from `composition-root.md`: `FeedService` (the `@MainActor` orchestrator,
+with its `convenience init(httpClient:store:)`, `loadRemoteFeedWithLocalFallback`,
+`loadLocalImageWithRemoteFallback` and `loadComments(for:)`), the store fallback decision, the
+remote-with-local-fallback strategies, logging from the root.
 The UI dialect changed; the object graph did not — `FeedService` and everything behind it is
 shared verbatim between a UIKit and a SwiftUI app. That is the payoff of keeping composition out
 of the modules.
@@ -151,7 +154,10 @@ extension EnvironmentValues {
 
 The `LoadResourcePresenter` job — turn resource events into view state — becomes an `@Observable`
 class whose stored properties *are* the view state. The adapter job (own the task, drive the
-presenter) folds into the same type, because observation replaces the view-protocol indirection:
+presenter) folds into the same type, because observation replaces the view-protocol indirection.
+This is the default whenever any client is SwiftUI: one `@Observable` view model per platform,
+over the Foundation-only mappers and strings every platform shares; MVP view protocols + proxies
+remain the default only when every client is imperative (`presentation-patterns.md`, Choosing):
 
 ```swift
 // FeedSwiftUI target — platform-agnostic apart from SwiftUI itself
@@ -166,22 +172,37 @@ public final class FeedViewModel {
 
     private let loadFeed: () async throws -> Paginated<FeedImage>
     private let onSelect: (FeedImage) -> Void
-    private var loadTask: Task<Void, Never>?
+    private let loadErrorMessage: String
+    private var hasLoaded = false
 
+    // loadErrorMessage is composed from the shared presentation module's table
+    // (e.g. the generic presenter's `loadError`), so this view model owns no copy.
     public init(loadFeed: @escaping () async throws -> Paginated<FeedImage>,
-                onSelect: @escaping (FeedImage) -> Void) {
+                onSelect: @escaping (FeedImage) -> Void,
+                loadErrorMessage: String) {
         self.loadFeed = loadFeed
         self.onSelect = onSelect
+        self.loadErrorMessage = loadErrorMessage
+    }
+
+    // `.task` re-runs every time the view appears (e.g. popping back from a pushed detail).
+    // A view model that outlives its view must not refetch on each appearance.
+    public func loadIfNeeded() async {
+        guard !hasLoaded else { return }
+        hasLoaded = true
+        await load()
     }
 
     public func load() async {
+        guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
         defer { isLoading = false }
         do {
             items = try await loadFeed().items
         } catch {
-            errorMessage = FeedPresenter.loadError   // strings still come from Presentation
+            errorMessage = loadErrorMessage
+            // `items` is deliberately left alone: a failed reload keeps what's on screen
         }
     }
 
@@ -197,13 +218,16 @@ public struct FeedView: View {
                 .onTapGesture { model.select(item) }
         }
         .refreshable { await model.load() }
-        .task { await model.load() }
+        .task { await model.loadIfNeeded() }
     }
 }
 ```
 
 Load-bearing details:
 
+- **A failed reload keeps the items.** The `catch` sets `errorMessage` and never clears `items`;
+  `isLoading` resets on both paths via `defer`. Resetting to empty (or a `state = .failed` enum
+  without the items) wipes the list on every refresh error (`presentation-patterns.md`).
 - **The closure is still the boundary.** `loadFeed: () async throws -> Paginated<FeedImage>` is
   injected by the composer — the view model has no idea whether it is remote, cached, composite,
   or paginated. Identical rule to the UIKit adapters.
@@ -211,6 +235,12 @@ Load-bearing details:
   `FeedPresenter`-provided strings; it does not invent user-facing copy. The cross-platform
   presentation layer survives intact — this class is the *binder*, replacing the view-controller
   binder from MVVM-in-UIKit (`presentation-patterns.md`).
+- **`.task` fires on every appearance, not once.** Pushing a detail and popping back re-runs it.
+  When the composer keeps the view model alive across appearances (the reason to hold it in the
+  composer at all), `.task` must call a first-load guard (`loadIfNeeded`), and only explicit user
+  intent (`.refreshable`, a retry button) calls `load()`. Without the guard the lifetime design
+  buys nothing: the list refetches and flickers on every back navigation. A view model created per
+  presentation (a new one per push) can load unconditionally.
 - **`.task` gives structured cancellation for free** — the task cancels when the view disappears,
   which replaces the `didEndDisplaying` cancellation choreography. Work that must *outlive* the
   view (fire-and-forget cache validation) does not belong in the view model — it belongs in
@@ -267,7 +297,7 @@ struct NavigationRootView: View {
 - **Deep linking and state restoration fall out for free**: a URL maps to a `[Route]`, assigned to
   `path`; `path` is `Codable`-friendly for scene storage. Both are root concerns — no view changes.
 - Tabs/split views: same shape, one `NavigationModel` per stack, all owned at the root.
-- A `Router` protocol abstraction over this is a one-implementation protocol — the skill's rule 12
+- A `Router` protocol abstraction over this is a one-implementation protocol — the skill's rule 13
   applies. The concrete `NavigationModel` in the app target is enough until a second
   implementation exists.
 
@@ -303,8 +333,11 @@ composes the same root with stubbed infrastructure — no `UIApplication`, no sc
 @MainActor
 @Suite struct FeedAcceptanceTests {
     @Test func onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() async throws {
-        let composer = AppComposer(httpClient: HTTPClientStub.online(response),
-                                   store: InMemoryFeedStore())
+        // The real CoreData store, in memory and synchronous — the same fixture as the
+        // UIKit acceptance tests. InMemoryFeedStore is the production fallback, not a test double.
+        let store = try CoreDataFeedStore(storeURL: URL(fileURLWithPath: "/dev/null"),
+                                          contextQueue: .main)
+        let composer = AppComposer(httpClient: HTTPClientStub.online(response), store: store)
 
         let feed = composer.makeFeedViewModel()      // the composer exposes the model it wires
         await feed.load()
@@ -314,9 +347,10 @@ composes the same root with stubbed infrastructure — no `UIApplication`, no sc
 }
 ```
 
-Make the composer's infrastructure **injectable with production defaults**
-(`init(httpClient: HTTPClient = ..., store: FeedStore & FeedImageDataStore = ...)`) — the same
-constrained-construction seam the UIKit root uses. Replace only infrastructure, never business
+Make the composer's infrastructure **injectable through a test-only convenience initializer**
+(`convenience init(httpClient:store:)` forwarding to `FeedService(httpClient:store:)`, as above) —
+the same seam the UIKit root uses; production calls the plain `init()`, so no default parameters
+leak into the production API. Replace only infrastructure, never business
 logic; assert on view-model state, which *is* the rendered state under observation. Pixel-level
 verification stays with snapshot tests (host the view in a `UIHostingController`); wiring
 verification lives here, fast and in-process.

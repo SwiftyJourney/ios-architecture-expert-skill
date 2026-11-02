@@ -39,7 +39,7 @@ Jump to:
 |---|---|---|
 | A use case both returns data and mutates state | Query with side effects | [CQS](#commandquery-separation-as-a-bloat-diagnostic) |
 | A protocol conformance with empty method bodies | The client is forced to implement what it does not need | [ISP](#interface-segregation) |
-| A protocol with exactly one implementation | The abstraction has no strategy to select between | [Dependency Rejection](#dependency-rejection) |
+| A single-method protocol with no named-contract need | A function type would compose with plain code | [Dependency Rejection](#dependency-rejection) |
 | A domain model with `Codable`/`@Model`/`CodingKeys` | Framework detail in a framework-agnostic type | [DTOs](#data-transfer-model-representations) |
 | Many types pointing at one type in the graph | Bottleneck for change | [Bottleneck analysis](#bottleneck-for-change-analysis) |
 | Business rule inlined in a loader/controller | App-agnostic logic living in app-specific code | [Three kinds of logic](#three-kinds-of-logic) |
@@ -105,6 +105,21 @@ A boundary is well-shaped when it **trades in its own currency**. `HTTPClient` d
 `HTTPURLResponse` — never in a domain model. That is what lets it move into its own module, be
 shared across features, and never break when the domain changes.
 
+A shared feature boundary also **does not know where its data comes from.** Anything specific to
+one implementation stays with that implementation:
+
+- **URLs and store paths are constructor-injected** into the concrete type, never method parameters
+  on the abstraction. The test: does putting it in the signature force every client to know a
+  detail of one strategy? (`load(from url:)` on a feed boundary does.)
+- **Source-specific error types** (`connectivity`, `invalidData`) live with the implementation; the
+  shared boundary throws plain `Error`. The case study's async code lets `HTTPClient` errors
+  propagate and maps *any* error to one presentation message, so the rule is "no
+  provenance-specific types in shared contracts", not "always wrap errors".
+
+**Ownership follows the clients.** A protocol lives with the code that calls it, not with its
+implementations — and when the clients move, the protocol moves. Once no presenter referenced
+`FeedImageDataLoader`, it moved from presentation to the feature module (005_007).
+
 **Messy boundaries, clean core.** Infrastructure is allowed to be ugly — threads, disks, sockets.
 That does not license an ugly codebase. The core stays side-effect-free; the mess is contained at
 the edges.
@@ -115,12 +130,18 @@ the edges.
 
 The step past dependency injection: **do not inject the dependency — compose it away.**
 
-> If you don't have multiple implementations of the protocol, you don't need a protocol. You don't
-> need multiple strategies.
+> A protocol with one method can always be replaced with a closure… sometimes you want to name
+> things to enforce some kind of contract. (001_2)
 
-A protocol exists to select between **strategies**. `FeedStore` has several (CoreData, in-memory)
-— it earns its protocol. A `FeedLoader` protocol with exactly one implementation earns nothing:
-it adds a name, a file, a conformance, and a fake in every test.
+The trade-off is **named contract vs anonymous signature**, not the number of strategies. A
+single-method boundary defaults to a function type, even with several implementations, because
+closures compose fallback, decoration and interception with plain code. A protocol earns its place
+when the boundary has **several cohesive methods** (`FeedStore`: delete/insert/retrieve), when a
+**named contract** matters to implementers (shared contract specs, external clients), or when
+**type-level conformance** carries meaning (`ResourceView` and its `associatedtype`). `FeedLoader`
+had remote, local and fallback implementations and was still deleted (commit `fa5568b`): once the
+pieces composed with universal abstractions, the named single-method protocol only added a name, a
+file, a conformance and a fake in every test.
 
 Instead, compose the pieces at the Composition Root into a plain function:
 
@@ -197,9 +218,19 @@ final class FeedCachePolicy {
 }
 ```
 
+The age limit is `private` because it is a business decision that will change (7 days today,
+14 next quarter). Callers ask the policy a yes/no question and never see the number. Tests express
+boundaries *relative* to the policy through one helper (the case study's `minusFeedCacheMaxAge()`
+test extension holds the only copy of the 7), so changing the rule edits the policy and that helper,
+not every suite that mentions "7 days".
+
 Choose the namespace form that fits: a `final class` with a private `init`, a `struct`, or an
 `enum` with no cases (which cannot be instantiated at all, so it needs no private init). In its own
 module it could simply be three free functions.
+
+Rules expressed in days use `Calendar.date(byAdding: .day, …)` with an explicit (Gregorian)
+calendar, never `n * 24 * 60 * 60` — not every day has 24 hours across DST changes. If the calendar
+returns `nil`, the policy answers "invalid" (`false`) rather than crashing (003_006).
 
 ---
 
@@ -215,12 +246,17 @@ The tell:
    appears nowhere in the spec. It is **implicit and hidden**.
 3. That hidden notion is where the complexity and the side effects came from.
 
-The fix is a **requirements change first, code second**: split into two use cases —
+The fix is a **requirements change first, code second**. Recommend confirming with product or the
+team whether `load` is supposed to delete at all — a reviewer cannot settle a hidden requirement by
+moving code. Then split into two use cases —
 `load` (a pure query) and `validateCache` (a command). Then:
 
 - Each is simple enough to test in isolation.
 - You can **schedule them independently** — validate on entering background, load on refresh.
 - Neither has to explain the other.
+
+Flag every behaviour change the split introduces (e.g. `load` now throwing on a retrieval error
+instead of returning `[]`) as something the team approves, not as the reviewer's preference.
 
 > The case study shipped deletion *inside* `load`, then reverted it when Load and Validate became
 > separate use cases. Code in `architecture-layers.md`.
@@ -239,10 +275,16 @@ forced to implement something it does not need.
 
 Heuristics:
 
-- **Aim for one method per protocol.** Every time a protocol reaches two methods, ask whether it
-  knows too much. (Multi-method boundaries are legitimate when the methods genuinely belong to one
-  contract — `FeedStore`'s delete/insert/retrieve are one storage contract. Two unrelated
-  operations are two protocols.)
+- **Keep each boundary to one cohesive contract.** Every time a protocol grows a method, ask whether
+  it knows too much. Multi-method boundaries are legitimate when the methods genuinely belong to one
+  contract — `FeedStore`'s delete/insert/retrieve are one storage contract. Two unrelated operations
+  are two boundaries, and a boundary that shrinks to a single method usually becomes a function type
+  (see Dependency Rejection).
+- **Share a boundary when clients need the same operations; split when the operations differ.**
+  One `HTTPClient` serves every remote loader because they all just GET. `FeedStore`
+  (delete/insert/retrieve with a timestamp) and `FeedImageDataStore` (insert/retrieve by URL) stay
+  separate even though `CoreDataFeedStore` implements both. Add an operation only when a use case
+  asks for it (006_001).
 - **A method that forces implementations to hold state is a design smell.** A `cancel(url:)`
   method obliges every implementation to remember previous requests. Return a cancellable token
   instead and move state management to the client.
@@ -306,6 +348,11 @@ Each module gets its own representation of the same concept: `FeedImage` (domain
 
 > It might look like we are duplicating code, but they change for different reasons. Separating
 > them lets each change at its own pace.
+
+**Each module names its types in its own language.** Domain types use the domain experts'
+vocabulary (`FeedImage`, `url`); the API module's private DTOs keep the backend's (`RemoteFeedItem`,
+`image`). A naming mismatch between teams is something to resolve deliberately — never paper over
+it in a shared model (003_005).
 
 The forces that make this pay:
 
@@ -469,6 +516,10 @@ is an anti-pattern — it conveys nothing and composes with nothing; use `Result
 bug source (the classic missing `else` that fires the completion twice). One exit point cannot
 have that bug.
 
+**Exhaustive `switch` vs `default` is a trade-off.** Listing every case of a stable enum makes the
+compiler flag every site when a case is added; use `default` only when the enum churns and every
+new case should land in the same branch (003_008).
+
 **Primitive obsession** is the same failure at a different scale: `UUID`, `String` and `URL`
 threaded through many signatures carry no meaning and can be swapped by mistake. A domain type or
 an endpoint enum that takes the model restores the compiler's help.
@@ -516,7 +567,7 @@ The counterweight, stated as plainly:
 
 ## Guardrails
 
-- Do not add a protocol that has exactly one implementation and no second strategy in sight
+- Do not add a single-method protocol where a function type would do — keep protocols for cohesive multi-method contracts, named contracts, or meaningful conformance
 - Do not put business rules in infrastructure — frameworks obey, they don't decide
 - Do not let a query mutate state — split the command out and fix the requirement first
 - Do not deduplicate code that shares a shape but not a reason to change
@@ -528,7 +579,8 @@ The counterweight, stated as plainly:
 
 ## Verification
 
-- [ ] Every protocol boundary has, or is credibly about to have, more than one implementation
+- [ ] Every protocol has several cohesive methods, a named-contract reason, or meaningful conformance; single-method boundaries are function types
+- [ ] Shared boundaries carry no provenance details (URLs, paths, source-specific error types)
 - [ ] Infrastructure types contain no conditional business logic
 - [ ] Business rules live in stateless, deterministic policy types
 - [ ] No conformance in the codebase has an empty method body

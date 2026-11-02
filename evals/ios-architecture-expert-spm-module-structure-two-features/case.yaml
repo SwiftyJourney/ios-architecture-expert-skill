@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-spm-module-structure-two-features
+expected_outcome: |
+  A local-package layout with per-feature vertical slices layered horizontally inside (Feed, FeedAPI, FeedCache, FeedCacheInfra, FeedPresentation, FeediOS / ImageComments*), shared modules (SharedAPI, SharedPresentation) justified by generalization, a coherent Package.swift whose targets match the tree, the app target consuming the local package and hosting the Composition Root, and inward-only dependency rules.

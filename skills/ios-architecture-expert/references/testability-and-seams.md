@@ -53,7 +53,17 @@ Do **not** widen the test's reach with `@testable`. Instead, make the behavior o
 
 **Access-control implication**: production types, initializers, and methods that a test needs to reach must be declared `public` deliberately — that declaration *is* the module's contract. Test-only helpers and fixtures (spies, `makeSUT`, `.empty` store factories) live in the **test target**, so they need no production access at all.
 
-**Same-target tests** (acceptance tests that live in the app target alongside `SceneDelegate`) don't need `import` at all, but the rule still holds in spirit: assert through the composed public seams — the injected `SceneDelegate` initializer and the rendered view — never private state.
+**Acceptance tests** live in their own test target (`EssentialAppTests` in the case study) and reach the app with `@testable import EssentialApp` — the one sanctioned use, explained next. Even there, assert through the composed seams — the injected `SceneDelegate` initializer and the rendered view — never private state. (The UI integration tests in the same target, `FeedUIIntegrationTests`/`CommentsUIIntegrationTests`, need only a plain `import EssentialApp`, because the composers are `public`.)
+
+### Test-induced design damage
+
+Test convenience never shapes production API. Each of these is a smell to undo, not a fix to keep:
+
+- **A default parameter added so tests compile** (`completion: @escaping () -> Void = { }`). Production wants every caller to pass it; move the default into a test-target helper (002/003).
+- **A conformance added only for asserts** — `Equatable` on a result or boundary enum. See the guardrail in `architecture-layers.md` (§Feature Layer): pattern-match in an `expect` helper instead (002/006).
+- **A swappable `static var shared`** so a test can replace the instance. That is not a singleton, it is mutable global state — see `dependency-management.md` §Three kinds of "singleton".
+- **A protocol that mirrors a framework type only so it can be mocked** (`URLSessionProtocol`). Shape the boundary by the use case (§1) — "abstractions for the tests" are not abstractions (002/007). The `URLProtocol`-stub mechanics live in `swift-testing-expert`.
+- **Call-recording properties in a production type** (`requestedURLs` on the real client). Recording belongs in a spy in the test target (002/001).
 
 ### The one exception: the Composition Root
 
@@ -63,9 +73,16 @@ not break tests. **A root module has no external clients**, so there is no contr
 - No other module references the Composition Root, so its types never need to be `public`.
 - Declaring them `public` purely so a test can reach them would be inventing an API nobody uses.
 
-So if the root lives in its own target, `@testable import App` is the correct tool there — and
-*only* there. In every feature module, a test that needs `@testable` is still a missing public
-seam. See `composition-root.md`.
+So `@testable import App` is the correct tool in the Composition Root's test target — and *only*
+there. In every feature module, a test that needs `@testable` is still a missing public seam. See
+`composition-root.md`.
+
+The case study shows the cost concretely: three snapshot suites in `EssentialFeediOSTests`
+(`FeedSnapshotTests`, `ListSnapshotTests`, `ImageCommentsSnapshotTests`) use
+`@testable import EssentialFeed` to reach the internal `ResourceErrorViewModel(message:)` /
+`.error(message:)` factories, because `ResourceErrorViewModel` has no public initializer. That is
+the missing-public-seam smell in the wild; this skill is deliberately stricter — expose the
+initializer (or a public factory) and drop the `@testable`.
 
 > Guardrail: outside the Composition Root, if a test only compiles with `@testable`, treat it as a missing public seam, not a reason to keep `@testable`.
 
@@ -99,9 +116,9 @@ final class FeedViewModel {
     let sut = FeedViewModel(/* no way to inject a spy */)   // ← does not compile
 }
 
-// Step 2 — introduce the boundary the failing test demands. It is a single method
-// with no interception need, so per this skill's own rule it is a CLOSURE, not a
-// `protocol FeedLoading` (design-principles.md, Dependency Rejection):
+// Step 2 — introduce the boundary the failing test demands. It is a single method,
+// so per this skill's own rule it is a CLOSURE, not a `protocol FeedLoading` — closures
+// compose fallback/decoration with plain code (design-principles.md, Dependency Rejection):
 @MainActor
 final class FeedViewModel {
     private let loadFeed: () async throws -> [FeedImage]
@@ -130,7 +147,7 @@ final class FeedViewModel {
 FeedViewModel(loadFeed: feedService.loadRemoteFeedWithLocalFallback)
 ```
 
-If the boundary genuinely has multiple implementations or needs interception (composite/decorator/fallback), the same three steps produce a protocol (`FeedStore`) instead of a closure — and the spy conforms to it in the test target.
+If the boundary has several cohesive methods, or a named contract matters to its implementers (shared specs, §2), the same three steps produce a protocol (`FeedStore`) instead of a closure — and the spy conforms to it in the test target. The number of implementations is not the test.
 
 ---
 
@@ -169,36 +186,61 @@ typealias FailableFeedStoreSpecs = FailableRetrieveFeedStoreSpecs
     & FailableDeleteFeedStoreSpecs
 ```
 
-### Shared assertion functions (free functions in extensions)
+(Excerpt — the real `FeedStoreSpecs` lists 11 requirements.)
+
+### Shared assertion functions
+
+The assertions are written once against the **protocol** (`on sut: FeedStore`) — that is what
+proves substitutability. In the case study they are top-level free functions
+(`FeedStoreSpecs/XCTestCase+FeedStoreSpecs.swift`):
 
 ```swift
-extension FeedStoreSpecs where Self: XCTestCase {
-    func assertThatRetrieveDeliversEmptyOnEmptyCache(
-        on sut: FeedStore,
-        file: StaticString = #filePath,
-        line: UInt = #line
-    ) {
-        expect(sut, toRetrieve: .success(.none), file: file, line: line)
-    }
-    // ... one assertThat helper per spec method
+func assertThatRetrieveDeliversEmptyOnEmptyCache(
+    on sut: FeedStore,
+    file: StaticString = #filePath,
+    line: UInt = #line
+) {
+    expect(sut, toRetrieve: .success(.none), file: file, line: line)
 }
+// ... one assertThat helper per spec method
 ```
 
-**Concrete test class** just calls the shared assertions:
+**Concrete test classes** just call the shared assertions. `makeSUT` returns the concrete store;
+the shape of each test follows the store's threading rules:
 
 ```swift
-// CoreData's failure modes can't be triggered deterministically — base spec only
-class CoreDataFeedStoreTests: XCTestCase, FeedStoreSpecs {
-    func test_retrieve_deliversEmptyOnEmptyCache() async throws {
-        let sut = try makeSUT()
+// In-memory store: plain makeSUT, the body runs directly (the store is @MainActor)
+@MainActor
+class InMemoryFeedStoreTests: XCTestCase, FeedStoreSpecs {
+    func test_retrieve_deliversEmptyOnEmptyCache() throws {
+        let sut = makeSUT()
         assertThatRetrieveDeliversEmptyOnEmptyCache(on: sut)
     }
-    // ... each spec method is one line delegating to the shared assertion
+    private func makeSUT() -> InMemoryFeedStore { ... }
+}
 
-    // Return the PROTOCOL, not the concrete type — proves substitutability
-    private func makeSUT() throws -> FeedStore { ... }
+// CoreData: every store call must run on the context's queue, so makeSUT is
+// closure-scoped and runs the spec body inside sut.perform { }.
+// Its failure modes can't be triggered deterministically — base spec only.
+@MainActor
+class CoreDataFeedStoreTests: XCTestCase, FeedStoreSpecs {
+    func test_retrieve_deliversEmptyOnEmptyCache() async throws {
+        try await makeSUT { sut in
+            assertThatRetrieveDeliversEmptyOnEmptyCache(on: sut)
+        }
+    }
+
+    private func makeSUT(_ test: @Sendable @escaping (CoreDataFeedStore) -> Void,
+                         file: StaticString = #filePath, line: UInt = #line) async throws {
+        let sut = try CoreDataFeedStore(storeURL: URL(fileURLWithPath: "/dev/null"))
+        trackForMemoryLeaks(sut, file: file, line: line)
+        await sut.perform { test(sut) }
+    }
 }
 ```
+
+A `let sut = try makeSUT(); assertThat…(on: sut)` shape would call CoreData off its queue — the
+closure-scoped `makeSUT` is load-bearing, not style.
 
 Conform to `Failable*` specs only when the implementation can deterministically simulate that failure (the since-deleted file-based store used invalid URLs/corrupt data). CoreData and InMemory conform to `FeedStoreSpecs` only.
 
@@ -279,7 +321,7 @@ class FeedAcceptanceTests: XCTestCase {
 > needs a scene-attached window, and treat it as a known liability.
 
 **Key techniques**:
-- `SceneDelegate.init(httpClient:store:)` is the test-injection seam — constructor injection, not launch-argument back doors.
+- `SceneDelegate.init(httpClient:store:)` is the test-injection seam — constructor injection, not launch-argument back doors. Beyond speed, back doors are a security risk: anyone can launch the app with arguments and take control of its state (006/005), so any such hook must at minimum be stripped from release builds.
 - `HTTPClientStub.online(response)` / `.offline` gives deterministic network behavior.
 - Test-target factory extensions on the **real** store provide the fixtures: `.empty`, `.withExpiredFeedCache`, `.withNonExpiredFeedCache` are `CoreDataFeedStore` extensions over `/dev/null`. `InMemoryFeedStore` is **not** used here — it is the production fallback (see `composition-root.md`).
 
@@ -351,17 +393,19 @@ extension CoreDataFeedStore {
 ## Guardrails
 
 - Do not widen production access for a test — expose a real public seam or change the design
+- Do not let test convenience shape production API — no default params so tests compile, no assert-only conformances, no swappable `static var shared`, no framework-mirroring protocols, no call-recording properties (see §0, Test-induced design damage)
 - Do not reach for a singleton or a subclass mock when a test needs infrastructure — extract a boundary shaped by the use case
 - Do not write per-implementation store tests — write the contract once and run it against each
 - Do not conform to a `Failable*` spec an implementation cannot deterministically satisfy
 - Do not substitute business logic in an acceptance test — only infrastructure
 - Do not use `Task.sleep` to wait in an acceptance test — poll for the state change with a timeout
+- Do not assert error identity — compare the expected error by value (`as NSError`: domain + code). Errors that cross a boundary (a `URLProtocol` stub, Objective-C bridging, an HTTP client) come back recreated with the same information, so an identity check fails even when the right error propagated
 
 ## Verification
 
 - [ ] No `@testable import` in a feature-module test target
 - [ ] Every boundary protocol was extracted because a test needed it, shaped by the use case rather than the framework
 - [ ] Each store implementation runs the shared specs, and only the `Failable*` specs it can honour
-- [ ] `makeSUT` in the spec tests returns the protocol, not the concrete type
+- [ ] Shared spec assertions take the boundary protocol (`on sut: FeedStore`); stores with queue confinement (CoreData) run each spec body inside their context (`makeSUT { sut in … }` → `sut.perform`)
 - [ ] Acceptance tests inject through the Composition Root's initializer, not a debug hook
 - [ ] Breaking the composition on purpose turns an acceptance test red

@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-cqs-split-bloated-use-case
+expected_outcome: |
+  A diagnosis that names Command-Query Separation: load() is a query that also mutates state, and the hidden 'invalidation' requirement is what makes it complicated. The fix splits it into a side-effect-free load() query and a separate validateCache() command, and extracts the 7-day expiry rule into its own policy type with the constant kept private. The answer should treat this as a requirements clarification first, not only a code move. It stays a review: diagnosis plus focused code, without inventing the user's surrounding infrastructure.

@@ -112,6 +112,20 @@ because the leak is in the *session*, not your type.
 > Note this is exactly why the case study's client takes a plain `URLSession` and no delegate: no
 > delegate, no retention problem.
 
+### The adapter is its own type
+
+Implement `HTTPClient` as a dedicated adapter — `URLSessionHTTPClient(session:)` — rather than
+`extension URLSession: HTTPClient`. The extension is shorter, but it puts your method name on
+Apple's type, where a future SDK method can collide with it; owning the adapter type avoids that
+(002_008). And never add production protocols that mirror `URLSession`/`URLSessionDataTask` just
+to make the adapter testable — that is test-induced cruft in production code (002_007). Test the
+adapter at the framework's own interception seam (`URLProtocol`); the mechanics are in the
+`swift-testing-expert` skill, `test-doubles-and-strategy.md`.
+
+The adapter also **does not choose the thread or executor its results arrive on** — it cannot
+know its clients' needs. Document that on the boundary ("may complete on any thread") and leave the
+hop to the client or the composition (003_013).
+
 ---
 
 ## Enumerate representable states
@@ -141,6 +155,12 @@ written (`Result`, or an enum with exactly the valid cases). Then a single priva
 `UnexpectedValuesRepresentation: Error` covers the should-never-happen branch — the app must not
 crash, and the customer must be able to retry.
 
+**A 2xx with an empty body is a valid success.** The URL Loading System delivers zero-byte `Data`
+(not `nil`) with an `HTTPURLResponse` when there is no body — `204 No Content`, for example. The
+HTTP client delivers it as success; whether an empty body is acceptable is the per-endpoint mapper's
+decision. A `guard !data.isEmpty` inside the client puts an endpoint rule into infrastructure and
+breaks every 204 endpoint (002_008).
+
 > Migrating to the async `URLSession.data(from:)` API **shrinks this table structurally** — some
 > invalid combinations become unrepresentable. Delete the tests for states that can no longer exist
 > rather than contorting a stub to produce them.
@@ -155,10 +175,13 @@ the course cites: keep values under ~100 KB comfortable in memory, and expect ~1
 where external storage pays off. Large binary data in model objects makes them expensive to keep in
 memory.
 
-**Loading the model from the right bundle.** The `.xcdatamodeld` lives in the *production* bundle,
-which is not the test bundle. Inject the bundle for tests and default to the main bundle in
-production. And load the `NSManagedObjectModel` **once**, cached statically — loading it twice
-registers duplicate `NSEntityDescription`s claiming the same `NSManagedObject` subclasses.
+**Loading the model from the right bundle.** The `.xcdatamodeld` lives in the *production* module's
+bundle, which is neither the test bundle nor (for a framework) the main bundle. The case study loads
+it from the framework bundle, `Bundle(for: CoreDataFeedStore.self)`, into a `@MainActor private
+static let model` — **once**, because loading it twice registers duplicate `NSEntityDescription`s
+claiming the same `NSManagedObject` subclasses. The injection seam is the designated
+`init(storeURL:contextQueue:model:)`; the convenience `init(storeURL:contextQueue:)` supplies the
+static model.
 
 **`/dev/null` as the test store URL.** Points CoreData at the null device: no SQLite artifacts on
 disk, all work in memory, faster (less I/O), and no cross-test cleanup because there is nothing to
@@ -232,8 +255,10 @@ safe, not more.
 ### Null Object
 
 Neutral behaviour instead of optionality: a `NullStore` whose deletes and inserts succeed and whose
-retrieval always finds nothing. The neutral behaviour is a *design decision*, not a template. It
-lives in the Composition Root and usually needs no tests, because it has no behaviour.
+retrieval always finds nothing. The neutral behaviour is a *design decision*, not a template — but
+whatever it is, the Null Object must still **finish the operation** (return, or call the
+completion), so clients never hang waiting (007/006). It lives in the Composition Root and usually
+needs no tests, because it has no behaviour.
 
 > **Prefer graceful degradation when the user would notice.** This codebase replaced its `NullStore`
 > with `InMemoryFeedStore`: a null store silently drops every write and the customer loses caching
@@ -316,6 +341,8 @@ backend and hides the bug.
 - Do not cache a connectivity determination
 - Do not mutate a `URLSessionConfiguration` after creating the session — it has no effect
 - Do not create a delegate-based `URLSession` without invalidating it
+- Do not conform `URLSession` to your boundary or mirror it with protocols — write a dedicated adapter
+- Do not reject an empty 2xx body in the HTTP client — the mapper decides
 - Do not write an infrastructure test suite before enumerating the representable states
 - Do not put framework conformances on framework-agnostic models
 - Do not swallow errors with `print` — assert in debug, log the fault in release, and degrade gracefully
@@ -328,6 +355,7 @@ backend and hides the bug.
 - [ ] Session configuration is fully set before the session is constructed
 - [ ] Any delegate-based session is invalidated in `deinit`
 - [ ] Every infrastructure boundary returns a type with no unrepresentable-state combinations
-- [ ] The CoreData model is loaded once, from an injected bundle, and tests point at `/dev/null`
+- [ ] The CoreData model is loaded once, from the module's own bundle, injectable through the store's initializer, and tests point at `/dev/null`
+- [ ] The HTTP client is a dedicated adapter type, accepts 2xx responses with empty bodies, and no production protocol mirrors `URLSession`
 - [ ] Failure paths assert in debug, log a fault in release, and have a defined fallback
 - [ ] No feature module imports a logging framework

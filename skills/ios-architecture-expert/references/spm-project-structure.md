@@ -25,7 +25,7 @@ Jump to:
 - [Dependency Graph](#dependency-graph)
 - [CI/CD](#cicd-github-actions-example)
 
-> The case study itself ships as **two Xcode projects + a workspace**, not a Swift package. This file is the recommended SPM-equivalent of that layout — use it when you want package-based modularity; the boundary rules are identical either way.
+> The case study itself ships as **two Xcode projects + a workspace**, not a Swift package, and its modules are coarser than the split below: one core `EssentialFeed.framework` holds domain, API, cache, presentation **and** infrastructure (it imports CoreData), separated only by folders (`Feed API/`, `Feed Cache/`, `Shared API Infra/`…); `EssentialFeediOS` holds the UIKit layer and `EssentialApp` the Composition Root. That core is UI-free, not Foundation-only. The finer SPM split in this file is **the skill's recommendation** — it turns the case study's folder boundaries into compiler-enforced ones. Use it when you want package-based modularity; the dependency rules are identical either way.
 
 ---
 
@@ -121,7 +121,7 @@ depends on it.
 
 ## Module Layout
 
-One feature (`Feed`), sliced horizontally. Target names, folder names and product names match
+The skill's recommended layout for one feature (`Feed`), sliced horizontally. Target names, folder names and product names match
 one-to-one — no `path:` overrides to remember:
 
 ```
@@ -212,9 +212,9 @@ classes — three suites over `LocalFeedLoader` is correct, one `LocalFeedLoader
 
 ```swift
 // swift-tools-version: 6.2
-// NOTE: the `.v26` platform constants and `.defaultIsolation` require tools 6.2. The concurrency
-// patterns in this skill (e.g. `Task.immediate`) additionally need an iOS 26-era deployment
-// target — on older targets fall back to plain `Task` (see concurrency-at-boundaries.md).
+// NOTE: `.v26` mirrors the case study. Use the app's real deployment target instead — never raise
+// it to unlock an API. The `.v26` constants and `.defaultIsolation` require tools 6.2; on older
+// targets use plain `Task` where this skill shows `Task.immediate` (concurrency-at-boundaries.md).
 import PackageDescription
 
 let package = Package(
@@ -315,17 +315,37 @@ Modules/Sources/
 
 The rules that keep this honest:
 
-- **Feature slices never import each other.** `Feed` and `ImageComments` are connected only in the
-  Composition Root (navigation from a feed cell to its comments is composed there — neither module
-  knows the other exists).
+- **By default, feature slices don't import each other.** `Feed` and `ImageComments` are connected
+  only in the Composition Root (navigation from a feed cell to its comments is composed there —
+  neither module knows the other exists). This is a judgment call, not a law: comments are an
+  extension of the feed, so an arrow like `ImageCommentsEndpoint.get(FeedImage)` would be
+  acceptable. Full decoupling pays off mainly when separate teams own the features; until then,
+  folder-level separation of decoupled types is enough, and extracting them later is cheap (007/004).
 - **`Shared*` modules earn their existence by generalization, not by anticipation.** They hold
   code that *two* features already demanded (the generalization arc in
   `presentation-patterns.md`) — never code that "might be shared someday".
-- **Watch the incoming arrows.** Every feature depends on `SharedAPI` and `SharedPresentation`,
-  which makes them change-bottlenecks: keep them tiny, abstract and stable. If a shared module
-  starts accumulating feature-specific knowledge, that code was never shared — move it back.
+- **Watch the incoming arrows.** In the target design, feature modules (`FeedAPI`,
+  `ImageCommentsPresentation`, `ImageCommentsiOS`) do **not** import `Shared*`. They expose pure
+  mappers, `title` + `map` presentation functions and platform-protocol conformances
+  (`UITableViewDataSource`/`Delegate`/`Prefetching`), and only the Composition Root imports both the
+  features and the shared generics (`LoadResourcePresenter`, `ListViewController`, `HTTPClient`).
+  A feature→shared arrow is an acceptable intermediate step, not the goal — "every time we change
+  the shared module, you may break every other module that depends on it" (007/002). If a shared
+  module starts accumulating feature-specific knowledge, that code was never shared — move it back.
 - A feature adds only the layers it needs — `ImageComments` has no cache, so there is no empty
   `ImageCommentsCache` target "for symmetry".
+
+The resulting arrows — features point only at their own domain; the shared modules are pulled in
+by the App target:
+
+```
+ImageCommentsAPI ──────────► ImageComments          SharedAPIInfra ──► SharedAPI
+ImageCommentsPresentation ─► ImageComments          SharedPresentation
+ImageCommentsiOS ──────────► ImageComments,         SharediOS
+                             ImageCommentsPresentation
+
+App Target (Composition Root) ──► every feature module + every Shared* module
+```
 
 ## Where the Composition Root lives
 
@@ -397,6 +417,10 @@ Making it work:
 - The moment a platform-specific component (a `UIViewController` subclass) lands in a shared
   target, that target loses macOS support instantly. That component belongs in the platform-specific
   module.
+- **`platforms:` sets minimum versions, it does not filter targets.** SwiftPM has no per-target
+  platform list: building the whole package for macOS fails on every UIKit target. A macOS build
+  works only through a scheme (or `swift build --target`) that selects the platform-independent
+  targets and their tests. Never claim a manifest restricts a target to iOS.
 - **CI needs one scheme per platform** — you cannot put an iOS-only test target in a scheme that
   also builds for macOS. Share `CI_macOS` and `CI_iOS` schemes and run both, so
   platform-independent tests run everywhere and platform-specific tests run only where they apply.
@@ -499,8 +523,8 @@ End-to-end API tests get their own CI-only scheme so they never run in the fast 
 - Do not mix test types in the same target — keep unit, integration, snapshot, and acceptance tests separate
 - Do not use `Bundle(for:)` in SPM targets — use `Bundle.module`
 - Do not split into physically separated modules before you have the problem it solves — start with folders and escalate
-- Do not create a shared module that every other module depends on — let the Composition Root do the sharing
-- Do not let feature modules import each other — cross-feature flows are composed in the root
+- Do not create a shared module that every other module depends on — let the Composition Root do the sharing; a feature→`Shared*` arrow is a stepping stone, not the target design
+- Do not let feature modules import each other by default — cross-feature flows are composed in the root; a deliberate arrow between closely related features is a judgment call, worth avoiding mainly when separate teams own them
 - Do not let a feature module depend on the Composition Root — that is a circular dependency waiting to happen
 - Do not make library products `.dynamic` by default — static is the right default; measure first
 
@@ -508,11 +532,13 @@ End-to-end API tests get their own CI-only scheme so they never run in the fast 
 
 - [ ] `swift-tools-version` matches the APIs used (6.2 for the `.v26` platform constants)
 - [ ] Platform pairs are coherent (`.iOS(.v26)` goes with `.macOS(.v26)` — SwiftPM won't check this for you)
-- [ ] Every target in the layout tree exists in `Package.swift`, and vice versa
+- [ ] Every target in the layout tree exists in `Package.swift`, and vice versa — including each
+      resource path a target `.process`es (show it in the tree; a missing path fails resolution)
 - [ ] `Feed` target has zero dependencies
 - [ ] `FeedAPI`, `FeedCache` and `FeedPresentation` depend only on `Feed`
 - [ ] `FeedCacheInfra` depends on `FeedCache` and declares CoreData resources
 - [ ] UI targets depend on `FeedPresentation`, never the reverse
-- [ ] No feature module imports another feature module
+- [ ] No feature module imports another feature module (or the arrow is a deliberate, documented judgment call)
+- [ ] Feature modules don't import `Shared*` in the target design — only the App target does
 - [ ] All targets build with `SWIFT_STRICT_CONCURRENCY = complete` — zero warnings
 - [ ] CI runs with `-enableThreadSanitizer YES`

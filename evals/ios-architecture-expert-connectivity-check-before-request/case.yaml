@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-connectivity-check-before-request
+expected_outcome: |
+  A refusal of the pre-flight approach with Apple's reasoning: there is no reliable way to determine connectivity ahead of a request and the result must not be cached, because the network can change between the check and the request. The recommended shape is to attempt the request and handle the result, configure the session (waitsForConnectivity, timeoutIntervalForResource) and use a cache fallback for the offline experience; reachability is used only to diagnose or explain a failure after the fact. Any auto-retry triggers only on a real offline-to-online transition, and the answer does not assume the user's codebase is a specific project.

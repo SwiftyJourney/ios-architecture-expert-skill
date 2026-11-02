@@ -104,9 +104,21 @@ go through the same scheduler.** A serial queue owned by the composer, or CoreDa
 queue, is what makes that true. (CoreData *is* thread-safe as long as every access goes through
 `perform`/`performAndWait`, which is why its scheduler may be concurrent.)
 
+The same reasoning tells you what an infrastructure boundary should *not* decide: which thread or
+executor its results arrive on. Document the contract on the protocol ("may complete on any
+thread") and leave the hop to the client or the composer (003/013: "the clients should decide
+because we don't know their needs").
+
+**CQS pays a concurrency dividend.** Inside a stateful implementation, queries have no side effects
+and can run concurrently; commands must be serialised. In the GCD era this was a reader-writer split
+(concurrent queue, `retrieve` plain, `insert`/`delete` with a barrier — 003/013). Treat that as the
+rationale and a legacy pattern, not the code to write today: with the sync store + `Scheduler`
+design, the serial context or actor serialises reads too, and that is usually fine.
+
 You can have as many schedulers as you want — one per domain module, or one for everything. It is
-a composition decision, and it is also what lets acceptance tests inject an immediate,
-main-queue scheduler and run synchronously.
+a composition decision, and it is also what lets acceptance tests run synchronously: in the case
+study they inject the real store configured with `contextQueue: .main`, whose `schedule`
+short-circuits without a hop — there is no separate scheduler object to inject.
 
 **Know where a threading test belongs.** "Dispatches to the main thread" is a *composition*
 concern, so it is tested in the UI integration/composition tests — not in the CoreData
@@ -121,7 +133,7 @@ The Scheduler protocol abstracts whether store operations run on CoreData's back
 Concurrency rationale:
 - The CoreData conformance short-circuits **synchronously** when `contextQueue == .main` — no async hop, so acceptance tests injecting the real store with `contextQueue: .main` run deterministically. Background contexts dispatch through `NSManagedObjectContext.perform`.
 - The InMemory conformance is always synchronous — the store is `@MainActor` with in-memory state.
-- Store side effects that follow a network result are wrapped in `store.schedule { }` not only for thread safety but to get OFF the HTTP client's callback context — doing cache writes where the response arrives delays delivery of other in-flight responses.
+- Store side effects that follow a network result are wrapped in `store.schedule { }` because, after `await httpClient.get`, the `@MainActor` `FeedService` is back on the main actor — `schedule` is what moves the cache work onto the store's (background) context instead of doing it on main. (In the closure/Combine era the rationale was different: get off the HTTP client's callback queue so cache writes didn't delay delivery of other in-flight responses.)
 
 ---
 
@@ -159,32 +171,39 @@ await store.schedule { [store] in
 }
 ```
 
-Capture `[store]` — not `[self]`. The `FeedService` is `@MainActor` and cannot be captured in a `@Sendable` closure. Capturing just the `store` (which is `Sendable`) satisfies the compiler.
+Capture `[store]` rather than reading `self.store` inside the closure. Capturing `self` itself is legal — a `@MainActor` class is implicitly `Sendable`, and `makePage` above does exactly that. What fails is touching main-actor-isolated *state* from the non-isolated `@Sendable` closure: `store` and `logger` are `@MainActor` `lazy var`s, so `self.store` inside the action is "main actor-isolated property 'store' can not be referenced from a Sendable closure". The capture list `[store, logger]` reads those values on the main actor, before the closure runs, and hands the closure plain `Sendable` copies.
 
 ---
 
 ## `Task.immediate` Pattern
 
-`Task.immediate` runs the closure synchronously up to the first suspension point (first `await`). This is critical for correct UI state sequencing.
+`Task.immediate` runs the closure synchronously up to the first suspension point (first `await`). A plain `Task` enqueues the whole body for a later turn.
 
 ### Why it matters
 
-In `LoadResourcePresentationAdapter.loadResource()`, the presenter must receive `didStartLoading()` **synchronously** before any async work begins. This ensures the loading indicator appears immediately. Concurrency-relevant lines only (full adapter: `adapters-and-proxies.md`):
+In `LoadResourcePresentationAdapter.loadResource()`, `didStartLoading()` is called **before** the Task is created, so it is synchronous either way — `Task.immediate` has nothing to do with it. What `Task.immediate` buys is that `loader()` starts in the same turn. Concurrency-relevant lines only (full adapter: `adapters-and-proxies.md`):
 
 ```swift
 presenter?.didStartLoading()                              // synchronous — before the Task
 cancellable = Task.immediate { @MainActor [weak self] in
-    // ...
-    if Task.isCancelled { return }                        // after every await
-    self?.presenter?.didFinishLoading(with: resource)
+    // runs now, up to the first real suspension: loader() is invoked in this turn
+    if let resource = try await self?.loader() {
+        if Task.isCancelled { return }                    // after every await
+        self?.presenter?.didFinishLoading(with: resource)
+    }
 }
 ```
 
+Two consequences the case study's tests depend on:
+
+1. The request is registered synchronously. Integration tests assert `loader.loadFeedCallCount == 1` right after `simulateAppearance()`, with no `await` (`FeedUIIntegrationTests`).
+2. With non-suspending stubs (`HTTPClientStub`) and a store whose `schedule` short-circuits (`contextQueue: .main`), the whole first load completes before `launch` returns, so acceptance tests assert rendered cells immediately (`FeedAcceptanceTests`). The same applies to `validateCache` below and the "deletes expired cache on entering background" test.
+
 ```swift
-// Incorrect: bare Task — didStartLoading() would run on the NEXT run loop iteration
-cancellable = Task { @MainActor [weak self] in  // BAD
-    self?.presenter?.didStartLoading()  // deferred — loading indicator appears late
-    // ...
+// With a bare Task, didStartLoading() still runs now, but loader() runs on a later turn —
+// tests asserting the request count or rendered output synchronously fail.
+cancellable = Task { @MainActor [weak self] in
+    if let resource = try await self?.loader() { ... }
 }
 ```
 
@@ -202,7 +221,7 @@ Task { await self.load() }
 #endif
 ```
 
-On the fallback path the work is *enqueued* rather than started synchronously, so tests relying on eager execution must await observable state instead — and preserve the synchronous-`didStartLoading` guarantee another way (e.g. call `didStartLoading()` before creating the Task, as above).
+On the fallback path the loader is *enqueued* rather than started synchronously. `didStartLoading()` is unaffected (it runs before the Task); what breaks is synchronous loader invocation and same-turn completion, so tests must await observable state instead. Never raise a user's deployment target just to get `Task.immediate`.
 
 ### Fire-and-forget with `Task.immediate`
 
@@ -285,7 +304,7 @@ func didCancelImageRequest() {
 }
 ```
 
-Called by `UITableViewDataSourcePrefetching` when a cell scrolls out of the prefetch window.
+Called by the cell controller's `cancelLoad()`, which runs both from `didEndDisplaying` (the cell scrolled off screen) and from `cancelPrefetchingForRowsAt` (the row left the prefetch window).
 
 ### Why cancellation matters architecturally
 
@@ -295,20 +314,27 @@ Without cancellation checks, a slow network response could deliver results to a 
 
 ## Swift 6 Strict Concurrency — Architectural Impact
 
-Enable strict concurrency across all targets:
+Enable strict concurrency across all targets. The case study's per-target settings (`project.pbxproj`):
 
-| Target | Setting |
-|---|---|
-| Feature framework | `SWIFT_STRICT_CONCURRENCY = complete` |
-| iOS UI framework | `SWIFT_STRICT_CONCURRENCY = complete` |
-| App target | `SWIFT_STRICT_CONCURRENCY = complete` |
+| Target | `SWIFT_VERSION` | `SWIFT_STRICT_CONCURRENCY` | `SWIFT_APPROACHABLE_CONCURRENCY` | `SWIFT_DEFAULT_ACTOR_ISOLATION` |
+|---|---|---|---|---|
+| `EssentialFeed` (core framework) + unit, cache-integration, API end-to-end tests | 6 | `complete` | `YES` | nonisolated (default) |
+| `EssentialFeediOS` (UIKit) | 6 | `complete` | `YES` | **`MainActor`** |
+| `EssentialFeediOSTests` | 6 | `complete` | `YES` | nonisolated (default) |
+| `EssentialApp` (Composition Root) + tests | 6 | `complete` | `YES` | nonisolated (default) |
+
+Only the UIKit module defaults to `MainActor` — which is why `CellController` has to opt its
+`Equatable`/`Hashable` conformances out with `nonisolated` (see
+[the limit](#the-limit-sync-protocol-requirements-bypass-actor-isolation)). The app target, where
+most of the wiring lives, stays nonisolated and annotates `FeedService`, composers and adapters
+with `@MainActor` one by one — the approach recommended below for existing apps.
 
 ### Where `@MainActor` goes
 
 | Layer | `@MainActor`? | Why |
 |---|---|---|
-| Domain models (`FeedImage`) | No | Value types, automatically `Sendable` |
-| Use-case protocols (`FeedCache`, `FeedStore`) | No | Implementation decides isolation |
+| Domain models (`FeedImage`) | No | Value types, explicitly `Sendable` (see below) |
+| Boundary protocols (`FeedStore`, `HTTPClient`) | No | Implementation decides isolation |
 | Cache policy (`FeedCachePolicy`) | No | Pure functions, no mutable state |
 | View protocols (`ResourceView`, `ResourceLoadingView`) | **Yes** | UI updates must happen on main thread |
 | Presenters (`LoadResourcePresenter`) | **Yes** | Drives UI state transitions |
@@ -317,18 +343,35 @@ Enable strict concurrency across all targets:
 | Composition Root (`FeedService`, Composers) | **Yes** | All wiring on main thread |
 | `InMemoryFeedStore` | **Yes** | Mutable state accessed from composition |
 
+**This is a deliberate Swift 6 trade-off, not the course's original stance.** The course rejected
+main-thread dispatch in the presenter because "the presenter is a platform-agnostic component.
+And dispatching in the main thread is an implementation detail because of UIKit" (005/010). The
+skill keeps that rule where it matters — a presenter never *dispatches*; hops happen at the
+composition site — but accepts `@MainActor` on view protocols and presenters because every Apple
+UI framework runs on the main actor and the annotation is checked at compile time, unlike runtime
+dispatch. The cost: a non-main renderer (CLI, server-side, background snapshotting) would have to
+hop onto the main actor to use the presenter.
+
 Annotate PUBLIC view protocols `@MainActor` explicitly even when the target builds with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` — the build setting is per-target and invisible to framework clients; the annotation makes isolation part of the API contract.
 
 ### Where `Sendable` goes
 
 | Type | `Sendable`? | Mechanism |
 |---|---|---|
-| `FeedImage`, `ImageComment` | Yes | `struct` + all stored properties are `Sendable` |
-| `LocalFeedImage` | Implicit | `struct` with only `Sendable` properties |
+| `FeedImage`, `ImageComment`, `ImageCommentsViewModel` | Yes | **Explicit** `Sendable` on a public `struct` whose stored properties are `Sendable` |
+| `LocalFeedImage` | No | Public struct declared only `Equatable` — never crosses an isolation boundary, so it doesn't need to be |
 | `Paginated<Item: Sendable>` | Yes | Explicit conformance, `loadMore` is `@Sendable` |
 | `CoreDataFeedStore` | Yes | Explicit `Sendable` conformance, `let` properties |
-| `InMemoryFeedStore` | No | `@MainActor` provides isolation instead |
-| `ResourceLoadingViewModel` | Implicit | `struct` with `Bool` property |
+| `InMemoryFeedStore` | Yes (implicit) | Global-actor-isolated classes are implicitly `Sendable` — which is why it satisfies `FeedStore & … & Sendable` in `FeedService` |
+
+Implicit `Sendable` inference applies only to **non-public** structs and enums. A `public`
+non-frozen struct is never implicitly `Sendable`, however simple its properties — write `Sendable`
+explicitly on public value types that cross a boundary, and leave it off the ones that don't.
+
+**Make a type `Sendable` only if it is meant to be used concurrently.** "Not all classes must be
+concurrency safe. Only types you want to use concurrently must be concurrency safe" (008/001).
+Don't force `HTTPClient` or every boundary protocol to be `Sendable` pre-emptively; add it where
+a value actually crosses isolation domains (as the `store` existential in `FeedService` does).
 
 ### Newer tools at the boundary
 
@@ -378,16 +421,32 @@ Guiding constraints worth stating up front, because they shape every later decis
   synchronous where it makes sense.
 - No blocking in an async context; no unsafe/unchecked escapes outside a temporary bridge.
 
-### Two build settings that decide a lot
+### Three build settings that decide a lot
 
 | Setting | Values | How to choose |
 |---|---|---|
 | `SWIFT_STRICT_CONCURRENCY` | minimal / targeted / **complete** | Go to `complete` per target — that is step 1 |
 | `SWIFT_DEFAULT_ACTOR_ISOLATION` | `nonisolated` / `MainActor` | `MainActor` is a good default for UI-heavy modules; `nonisolated` for mixed/non-UI ones |
+| `SWIFT_APPROACHABLE_CONCURRENCY` | `NO` / `YES` | Xcode 26's recommended setting; among other things it enables `InferIsolatedConformances` (SE-0470). Know it is on — it changes which isolation errors you see (see [the limit](#the-limit-sync-protocol-requirements-bypass-actor-isolation)) |
 
 New Xcode projects default to MainActor isolation. **For an existing app being migrated, do not flip
 the app target wholesale** — "it will be a big change in behavior for our existing app, and things
-can break unexpectedly." Annotate types one by one instead.
+can break unexpectedly." Annotate types one by one instead. The case study does exactly this: only
+the UIKit module (`EssentialFeediOS`) uses `MainActor` by default; the core framework and the app
+target stay nonisolated with explicit annotations (table in
+[Swift 6 Strict Concurrency](#swift-6-strict-concurrency--architectural-impact)).
+
+### Prove equivalence before deleting the old API
+
+Before deleting a legacy closure/Combine method, re-implement it on top of the new async
+implementation and run the **existing** tests against it. Green means the new code preserves
+behaviour — "if the test pass with the new method, it means we kept the same behavior" (008/005).
+Only then migrate callers and delete the old method. This is the opposite direction from the
+deprecation bridge below (which wraps old in new to unblock callers); use both.
+
+Migrate the **smallest feature first**, and harvest reusable building blocks along the way — a
+generic async spy, an async `Scheduler` — so the bigger features reuse them: "deal with the
+low-hanging fruit first" (008/004).
 
 ### Deprecation bridge for a protocol boundary (5 steps)
 
@@ -409,8 +468,14 @@ The deprecation warnings *are* the roadmap: they show you precisely which call s
 Swift Concurrency can preserve *logical* behaviour while changing *timing* behaviour, and tests will
 catch the difference. Two specifics:
 
-- **Combine's `Future` runs its body immediately; `Task` does not.** Use `Task.immediate` where the
-  old code executed eagerly — this is what keeps a synchronous `didStartLoading` synchronous.
+- **The Combine pipeline started work synchronously at subscription; a plain `Task` enqueues it.**
+  The course wrapped loaders in `Deferred { Future { … } }` precisely because an eager `Future`
+  (firing on creation) was a problem — "we want to only fire a request when someone subscribes"
+  (006/011). With `sink` called synchronously in the adapter, the request still started in the same
+  turn. `Task.immediate` restores that synchronous start (the request is registered before
+  `loadResource()` returns); plain `Task` defers it. The course's `ImmediateWhenOnMainQueueScheduler`
+  was the same timing concern: an unconditional `receive(on: DispatchQueue.main)` always hops
+  asynchronously, even when already on main.
 - **A `Task` is not an `AnyCancellable`.** Cancellation on `deinit` was automatic with Combine; with
   tasks you must cancel manually, and you must check `Task.isCancelled` yourself after each `await`.
 
@@ -426,32 +491,50 @@ contorting a stub to produce a state that can no longer exist.
 
 ## The limit: sync protocol requirements bypass actor isolation
 
-**This is the most important thing to know about Swift 6 in a layered app, and it is not obvious.**
+**What you see depends on one build setting, so know which world you are in.**
 
-Actor isolation is enforced at `await` boundaries. A **synchronous** protocol requirement has no
-suspension point, so calling it through the protocol — existential or generic — can execute
-immediately on the caller's thread. Protocol witness tables do not carry isolation.
+A `@MainActor` type conforming to a non-isolated **synchronous** protocol behaves differently with
+and without Approachable Concurrency:
 
 ```swift
-@MainActor final class InMemoryFeedStore: FeedStore {   // isolated…
-    func retrieve() throws -> CachedFeed? { ... }        // …but this is a sync requirement
+@MainActor public class InMemoryFeedStore { ... }
+extension InMemoryFeedStore: FeedStore {               // FeedStore is NOT @MainActor
+    func retrieve() throws -> CachedFeed? { ... }      // sync requirement, main-actor witness
 }
-
-// FeedStore is NOT @MainActor. From a @concurrent context:
-let cache = try store.retrieve()   // runs off the main actor, mutating main-actor state
 ```
 
-**No warning. No compile error. A real data race.** That is intended behaviour, not a bug — and it
-means a `@MainActor` annotation on the implementation buys you nothing when the protocol is
-reached synchronously.
+- **Plain Swift 6** (no `InferIsolatedConformances`): this is a compile error —
+  "conformance of 'InMemoryFeedStore' to protocol 'FeedStore' crosses into main actor-isolated code
+  and can cause data races" `[#ConformanceIsolation]`. If a user reports that diagnostic, this is
+  why.
+- **Approachable Concurrency** (`SWIFT_APPROACHABLE_CONCURRENCY = YES`, Xcode 26's recommended
+  setting, which turns on `InferIsolatedConformances`, SE-0470): the compiler silently infers an
+  *isolated conformance* — `InMemoryFeedStore: @MainActor FeedStore`. It compiles. SE-0470 forbids
+  using that conformance from outside the main actor, but once the value travels as
+  `any FeedStore & Sendable` (exactly the type `FeedService` stores) and the sync requirement is
+  called from a `@concurrent` function or `Task.detached`, you can get **no diagnostic and no
+  runtime trap** — `retrieve()` runs off the main actor, touching main-actor state. A real data race.
 
-Three fixes, in the order you should consider them:
+Every case-study target enables Approachable Concurrency, which is the only reason
+`extension InMemoryFeedStore: FeedStore` compiles there at all. So the hole is real in that
+configuration — but it is a property of inferred isolated conformances, not of Swift 6 in general.
 
-| Fix | When it works | Cost |
+Your options, in the order you should consider them:
+
+| Option | When it works | Cost |
 |---|---|---|
-| **Scheduler in the Composition Root** ✅ | Always | The root hops to the right executor before invoking the sync API — concurrency stays confined to the root |
+| **Scheduler hop in the Composition Root** ✅ (what the case study does) | Always | `InMemoryFeedStore.schedule` is `@MainActor` and runs `action()` on main, so every sync store call happens on the right executor — concurrency stays confined to the root |
+| Explicit isolated conformance (`extension InMemoryFeedStore: @MainActor FeedStore`) | You can keep the value out of `Sendable` / off-main contexts | Makes the isolation visible and checkable; breaks down as soon as the existential is erased to `& Sendable` and handed off-main |
+| `nonisolated` witnesses (state behind a `Mutex`, or immutable) | The work is short, synchronous and genuinely thread-safe | You are back to making the component thread-safe yourself |
 | Make the requirements `async` | You control the protocol | Restores the `await` boundary, but leaks asynchrony up the call chain |
 | Isolate the protocol to an actor | *All* implementations genuinely share that isolation | Wrong for most infrastructure |
+
+The same mechanism explains a UIKit-module detail: `EssentialFeediOS` is the only case-study
+target built with `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, so a plain
+`extension CellController: Equatable, Hashable` would be inferred main-actor-isolated — but the
+diffable data source compares and hashes items off the main queue. Hence
+`extension CellController: nonisolated Equatable, nonisolated Hashable` with `nonisolated` `==` and
+`hash(into:)` (`CellController.swift`).
 
 **Do not isolate a store protocol.** CoreData has its own threading model, SQLite has another — "it's
 not possible to define an actor isolation that will work well for all implementations, because
@@ -467,10 +550,9 @@ the presenter using it becomes `@MainActor` too.
 
 **The takeaway:** Swift Concurrency prevents data races *only if you annotate correctly*. It will
 not save you from bad design or logical errors. Where the compiler cannot check something — such as
-an isolated type conforming to a non-isolated sync protocol — **write a test for it.** In the case
-study, exactly that test caught a race the Swift 6 compiler accepted silently.
-
----
+an inferred isolated conformance reached through a `Sendable` existential — **write a test for it.**
+In the case study, exactly that test caught a race the compiler (with Approachable Concurrency on)
+accepted silently.
 
 ---
 
@@ -488,11 +570,12 @@ study, exactly that test caught a race the Swift 6 compiler accepted silently.
 
 - Do not add `@MainActor` to domain types or store protocols — isolation is a composition decision
 - Do not use `@unchecked Sendable` — redesign the type as a value type or use `@MainActor`
-- Do not use `DispatchQueue`, semaphores, or locks in async contexts — use actors or `Mutex`
-- Do not capture `self` in `@Sendable` closures when `self` is `@MainActor` — capture specific `Sendable` properties instead (e.g., `[store]`, `[httpClient]`)
+- Do not use `DispatchQueue`, semaphores, or locks (`Mutex` included) to protect state reached from async code — use actor isolation (`@MainActor` if the work is light, otherwise a dedicated actor). Reserve `Mutex` for short critical sections in synchronous code (e.g. legacy `URLProtocol` test stubs); never block an async context (008/004)
+- Do not make a type `Sendable` unless it is meant to be used concurrently — and don't force every protocol (`HTTPClient`, stores) to be `Sendable` pre-emptively
+- Do not read main-actor-isolated state (`self.store`, `self.logger`) inside a non-isolated `@Sendable` closure — capture the values instead (`[store, logger]`). Capturing a `@MainActor` `self` is legal; touching its isolated properties from the closure is not
 - Do not make a domain or store boundary `async` because one implementation happens to be — keep it synchronous and inject the execution context at the composition site
 - Do not make components thread-safe individually when the Composition Root can own threading as a cross-cutting concern — but if you take that route, route *every* call through the same scheduler
-- Do not assume a `@MainActor` type stays isolated when reached through a non-isolated **synchronous** protocol requirement — the compiler will not warn you; hop executors in the Composition Root
+- Do not assume a `@MainActor` type stays isolated when reached through a non-isolated **synchronous** protocol requirement under Approachable Concurrency — the inferred isolated conformance can be called off-main through a `Sendable` existential without a warning; hop executors in the Composition Root. (In plain Swift 6 the same conformance is a `#ConformanceIsolation` error instead.)
 - Do not isolate an infrastructure protocol to an actor — threading is an implementation detail and must not leak into the boundary
 - Do not enable Complete checking on every target at once, and do not flip an existing app target to MainActor-by-default wholesale
 - Do not keep tests for invariants the compiler now enforces, or for states the new API cannot represent
@@ -507,5 +590,6 @@ study, exactly that test caught a race the Swift 6 compiler accepted silently.
 - [ ] All `@Sendable` closures capture only `Sendable` values
 - [ ] Run Thread Sanitizer in CI (xcodebuild flag `-enableThreadSanitizer YES`) — zero data races
 - [ ] Run with `-com.apple.CoreData.ConcurrencyDebug 1` in test schemes — zero context-queue violations
-- [ ] `Task.immediate` used where synchronous-first execution is needed (iOS 26+ targets; earlier targets use plain `Task` with observable-state-based tests)
+- [ ] `Task.immediate` used where the loader must start in the same turn (iOS 26+ targets; earlier targets use plain `Task` with observable-state-based tests — never raise the deployment target for it)
+- [ ] You know whether each target has `SWIFT_APPROACHABLE_CONCURRENCY` and `SWIFT_DEFAULT_ACTOR_ISOLATION` set — they decide which isolation diagnostics you get
 - [ ] `Task.isCancelled` checked after every `await` in adapter code

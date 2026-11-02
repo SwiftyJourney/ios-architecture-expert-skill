@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-cache-use-case-tests
+expected_outcome: |
+  A Swift Testing suite named after the behavior (CacheGalleryUseCaseTests or similar), driving the design with a hand-rolled GalleryStoreSpy that records messages in an enum array to assert order (.deleteCachedGallery then .insert(items, timestamp)), a makeSUT() factory used by every test, the current date injected as a closure with a fixed Date in tests, and zero real infrastructure. The requested `save(_:) async throws` signature is kept.

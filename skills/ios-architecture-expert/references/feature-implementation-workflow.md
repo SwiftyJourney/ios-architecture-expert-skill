@@ -101,6 +101,8 @@ The same shape applies to collections: test **zero, one, and many**.
 
 Write a narrative and acceptance criteria before any code — use the `requirements-engineering` skill to turn the feature idea into a narrative plus Given/When/Then scenarios. Each scenario becomes one acceptance test in Step 9.
 
+**Backend not ready?** Start from the part you know most about: the boundary module (models and interfaces, with only incoming arrows), so UI, API and cache can proceed in parallel. Agree a JSON payload contract, with example responses, with the backend team and build the API layer and its mapper against it; add the end-to-end test once a test endpoint exists (001_5).
+
 ---
 
 ## Step 2: Create Domain Model (Feature Layer)
@@ -117,10 +119,10 @@ public struct FeedImage: Hashable, Sendable {
 
 Checklist:
 - [ ] `struct` (value type)
-- [ ] `Hashable` (for diffable data sources / `ForEach`)
+- [ ] `Equatable`, or `Hashable` when it is a diffable/`ForEach` identity (`ImageComment` is only `Equatable`)
 - [ ] `Sendable` (for async/await boundaries)
 - [ ] Foundation only — no UIKit/SwiftUI imports
-- [ ] Define use-case protocols: `FeedCache`, `FeedImageDataLoader`, etc.
+- [ ] Single-method boundaries are function types (`() async throws -> [FeedImage]`); a protocol only for a cohesive multi-method contract like `FeedStore` (see `design-principles.md` § Dependency Rejection)
 
 ---
 
@@ -161,7 +163,8 @@ public enum FeedEndpoint {
     public func url(baseURL: URL) -> URL { ... }
 }
 
-// Feed/API/FeedItemsMapper.swift
+// Feed/API/FeedItemsMapper.swift — caseless enum is this skill's recommendation;
+// the case study uses `public final class` with static members
 public enum FeedItemsMapper {
     private struct Root: Decodable { ... }
     public enum Error: Swift.Error { case invalidData }
@@ -171,7 +174,7 @@ public enum FeedItemsMapper {
 ```
 
 Checklist:
-- [ ] Endpoint is an `enum` with associated values
+- [ ] Endpoint is an `enum` with associated values while only the Composition Root uses it; a struct with static factories if it is public or churns (`architecture-layers.md` § API Layer)
 - [ ] Endpoint computes URL from a `baseURL` parameter
 - [ ] Mapper is a caseless `enum` with `static` methods — no instance state
 - [ ] Decodable types are `private` (never leaked)
@@ -213,6 +216,8 @@ Checklist:
 - [ ] `Scheduler` protocol awareness: store operations will be dispatched through `Scheduler.schedule` in the Composition Root
 - [ ] InMemory fallback: ensure `InMemoryFeedStore` can serve as a production fallback
 - [ ] Tests: save (delete-then-insert), load (with/without valid cache), validate
+
+A use case is a recipe, not a class: one type (`LocalFeedLoader`) can host save, load and validate, **one extension per use case** with its own typealiases and private helpers, and one test file per use case that builds the type through `makeSUT`. Splitting it into separate types later then breaks no tests (003_008).
 
 ---
 
@@ -282,9 +287,9 @@ Checklist:
 ```swift
 // App/FeedUIComposer.swift
 public static func feedComposedWith(
-    feedLoader: @escaping () async throws -> Paginated<FeedImage>,
-    imageLoader: @escaping (URL) async throws -> Data,
-    selection: @escaping (FeedImage) -> Void = { _ in }
+    feedLoader: @MainActor @escaping () async throws -> Paginated<FeedImage>,
+    imageLoader: @MainActor @escaping (URL) async throws -> Data,
+    selection: @MainActor @escaping (FeedImage) -> Void = { _ in }
 ) -> ListViewController { ... }
 ```
 
@@ -314,7 +319,7 @@ func test_onLaunch_displaysRemoteFeedWhenCustomerHasConnectivity() throws {
 Checklist:
 - [ ] Test each BDD scenario from Step 1
 - [ ] Use `HTTPClientStub.online/.offline` for deterministic network
-- [ ] `launch` is **synchronous** — pass the real `CoreDataFeedStore.empty` (`/dev/null`, `.main` context); carry one store instance across simulated launches for cache persistence (see `testability-and-seams.md` §5)
+- [ ] `launch` is **synchronous** — pass the real `CoreDataFeedStore.empty` (`/dev/null`, `.main` context); carry one store instance across simulated launches for cache persistence (see `testability-and-seams.md` §3)
 - [ ] Inject via `SceneDelegate` convenience init
 - [ ] DSL helper methods for readable assertions; `withWaitingChanges` (not `Task.sleep`) for parallel side effects
 
@@ -367,6 +372,8 @@ Generic abstractions (`LoadResourcePresenter`, `LoadResourcePresentationAdapter`
 6. Delete the now-unused concrete logic.
 
 Never create generics for a single client — duplication across two features is the signal, and two green implementations side by side prove the abstraction's shape.
+
+When a concrete type becomes generic, keep the old name compiling with a typealias (`typealias RemoteFeedLoader = RemoteLoader<[FeedImage]>`, plus a convenience init if needed) so no client breaks mid-refactor — "if you define a type alias, you don't break clients" (007/001). Delete the use-case tests the generic suite now duplicates, and retire the alias once the composition has moved.
 
 > Migrating an *existing* protocol boundary (sync→async, completion→`throws`)? See the migration playbook in `concurrency-at-boundaries.md` — same incremental, tests-green-throughout discipline.
 

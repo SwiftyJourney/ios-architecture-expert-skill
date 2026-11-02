@@ -1,0 +1,4 @@
+schema_version: "1.1"
+name: ios-architecture-expert-swiftui-composition-root
+expected_outcome: |
+  An @main App-based Composition Root: a composer owned via @State/static holding lazy infrastructure and FeedService, factory methods creating @Observable view models injected into views via init, environment reserved for cross-cutting values, and a NavigationStack(path:) navigation model owned by the root with feature views emitting selection closures instead of pushing destinations. It does not invent new features or FeedService APIs, and labels any assumed API names.

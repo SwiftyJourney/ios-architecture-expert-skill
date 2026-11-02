@@ -102,12 +102,12 @@ extension LoadResourcePresentationAdapter: FeedImageCellControllerDelegate {
 ```
 
 **Key details**:
-- `Task.immediate` ensures `didStartLoading()` runs synchronously before the async work begins
+- `didStartLoading()` is called before the Task exists, so it is synchronous regardless; `Task.immediate` makes `loader()` start in the same turn, so the request is registered synchronously and, with non-suspending stubs, tests can assert without awaiting (iOS 26+, no back-deployment — on earlier targets use plain `Task`; see `concurrency-at-boundaries.md`)
 - `[weak self]` prevents retain cycles between the adapter and the task
 - `isLoading` guard prevents duplicate requests
 - `Task.isCancelled` checks after every `await` prevent stale results from reaching the presenter
 - `deinit` cancels in-flight tasks when the adapter is deallocated. This compiles clean under Swift 6 strict concurrency only because it touches the object's own `Sendable` stored property (`Task` is `Sendable`); touching any *other* `@MainActor` state from `deinit` requires `isolated deinit` (SE-0371, Swift 6.2 compiler; no OS floor for `@MainActor` classes, macOS 15.4/iOS 18.4 floor for plain actors)
-- `didCancelImageRequest()` provides explicit cancellation for prefetching
+- `didCancelImageRequest()` provides explicit cancellation — the cell controller calls it when the cell ends displaying and when prefetching is cancelled
 - `presenter` is deliberately a `var` (property injection) — the adapter→presenter→view→adapter cycle can only be closed after construction, in the Composition Root. Everywhere else prefer constructor injection.
 
 ---
@@ -153,6 +153,13 @@ another (the view adapter the composer owns). A rule baked into the presenter ca
 both. Memory management is a responsibility of the composer. See the full reasoning in
 [presentation-patterns.md](presentation-patterns.md#memory-management-belongs-in-the-composer).
 
+**Which references to proxy:** follow each reference the presenter holds — if it leads back to the
+presenter (view → adapter → presenter → view), it closes a cycle and gets a `WeakRefVirtualProxy`;
+if the presenter is its only owner, it stays strong. In `FeedUIComposer` the `ListViewController`
+is proxied (it owns the adapter that owns the presenter), but the `FeedViewAdapter` is passed
+strongly — proxy it and it deallocates immediately, and nothing renders: "making the feed view weak
+would break the current composition" (005/007).
+
 **SwiftUI note**: `WeakRefVirtualProxy` is **not needed** with `@Observable`. SwiftUI manages the view lifecycle — when a view disappears, its `@Observable` view model is released automatically. The proxy pattern is UIKit-specific.
 
 ---
@@ -188,6 +195,15 @@ func loadWithFallback(
 Naming carries the flexibility. `remote`/`local` describe *this* use; `primary`/`fallback`
 describe the pattern, and that rename is what makes the type genuinely reusable. Suffix the type
 with `Composite` so readers know the semantics.
+
+**Depend on the abstraction, not on concrete `Remote…`/`Local…` types.** A composite that takes
+concrete loaders turns its unit tests into integration tests: add an access-token dependency to the
+remote loader and unrelated composite tests break (006/002). The price is that both parameters now
+have the same type, so the compiler can't catch swapped arguments — and that applies equally to the
+closure form above, where two `() async throws -> [FeedImage]` parameters can be passed in the wrong
+order silently. Cover it with behaviour tests ("what do you do when you don't have compile time
+guarantees? You write tests"); marker protocols would restore the check, at the cost of extra types
+the course chose not to add.
 
 **Composition asymmetry is a real decision**, not an oversight: feed loading is remote-first
 (freshness matters), image loading is local-first (image data per URL is immutable and expensive
@@ -281,9 +297,18 @@ Two alternatives that look reasonable and are not:
 | Put the save **inside the composite** | The composite now depends on a concrete cache type — it stops being composable |
 | Add `save` to the loader boundary | ISP violation (loaders are forced to implement saving) and arguably LSP — not every loader can save |
 
-The right move is a **role-specific abstraction**: a narrow `FeedCache` protocol with just `save`,
-owned by the feature module. The interceptor depends on that; the concrete `LocalFeedLoader`
-conforms to both it and the loading boundary.
+The right move is a **role-specific abstraction** for the save — a narrow capability with just
+`save`, owned by the feature module — and the interceptor depends on that. With async/await the
+narrowest form is often a function, `([FeedImage]) throws -> Void`, or the interceptor is a plain
+function in the Composition Root as above; a single-method protocol earns its place only when a
+named contract matters (see `design-principles.md` on protocol vs closure).
+
+> History, so you don't copy a leftover: the case study still declares `FeedCache` (and
+> `FeedImageDataLoader`/`FeedImageDataCache`), but each has one conformer (`LocalFeedLoader`,
+> `LocalFeedImageDataLoader`) and no consumer — `FeedService` calls the concrete loaders inside
+> `store.schedule`. There is no "loading boundary" any more either: the `FeedLoader` protocol was
+> deleted in `fa5568b` once Combine's universal abstractions made it redundant. They were earned
+> when the hand-rolled `FeedLoaderCacheDecorator` consumed them; today they are vestigial.
 
 Rules that keep interception honest:
 
@@ -329,12 +354,16 @@ Several of these patterns are specializations of operations the language already
 the **vocabulary** — it is how you communicate intent — but skip the boilerplate when a built-in
 does the job:
 
-| Pattern | Hand-rolled type | Built-in equivalent |
-|---|---|---|
-| Fallback composite | `LoaderWithFallbackComposite` | `do { try await primary() } catch { try await fallback() }` |
-| Side-effect decorator | `CacheDecorator` | A wrapping `async` function, or `map` over the result |
-| Main-queue dispatch decorator | `MainQueueDispatchDecorator` | `@MainActor` isolation — the type system proves it |
-| Threading scheduler | Hand-rolled queue plumbing | `Scheduler.schedule` + actor isolation (`composition-root.md`) |
+| Pattern | Hand-rolled type (closure era) | Combine era | async/await equivalent |
+|---|---|---|---|
+| Fallback composite | `FeedLoaderWithFallbackComposite` | `.fallback(to:)` | `do { try await primary() } catch { try await fallback() }` |
+| Side-effect decorator | `FeedLoaderCacheDecorator` | `.caching(to:)` | A wrapping `async` function, or `map` over the result |
+| Main-queue dispatch decorator | `MainQueueDispatchDecorator` | `.receive(on:)` with an immediate-when-on-main scheduler | `@MainActor` isolation — the type system proves it |
+| Threading scheduler | Hand-rolled queue plumbing | `.subscribe(on:)` | `Scheduler.schedule` + actor isolation (`composition-root.md`) |
+
+The names in the second column are the case study's historical types (replaced by Combine
+operators in `12d8b4a`/`8672234`, 2020; the Combine was later replaced by async/await). Your own
+generic equivalents would be `LoaderWithFallbackComposite`, `CacheDecorator`, and so on.
 
 The judgement call is reuse: a `do/catch` inline in one composer is clearer than a type; the same
 fallback needed in four compositions earns the type. Write the type when it removes duplication,
@@ -453,6 +482,40 @@ private func makePage(items: [FeedImage], last: FeedImage?) -> Paginated<FeedIma
 
 The `last` item determines if there are more pages. When `last` is `nil`, `loadMore` is `nil` — pagination ends. The closure captures `self` (the `FeedService`) to enable recursive page loading.
 
+### The pagination contract
+
+- **Each page carries ALL items loaded so far**, not just the new ones. Whoever builds the pages
+  (the Composition Root) merges and de-duplicates; the UI never appends or dedups — "it's up to the
+  clients that create the pages" (007/005).
+- **The UI only calls `loadMore()`.** It doesn't know whether the backend is keyset- or
+  offset-based, so you can switch between them without touching UI or presentation.
+- **The cache knows nothing about pagination** — "that's an API detail." Each accumulated page is
+  saved through the existing `save(items)`.
+- **The cursor is the last item of the new page**; an empty new page gives `last == nil`, so
+  `loadMore == nil`.
+- **Never compute page keys client-side** (e.g. from sequential IDs) — that couples the client to
+  the backend's key scheme.
+- The case study's `async let` re-read of the cache alongside the remote page is an optional,
+  measured memory optimisation, not part of the contract — the default is to accumulate in memory.
+  If you mention it, state its risk: an expired cache or a failed save makes the re-read return
+  fewer items than are on screen, so load-more silently drops pages.
+
+**Load-more is content, not a list feature.** It is just another `CellController` in its own
+section, built by `FeedViewAdapter`. Never add `hasPagination` / `showsRefresh` /
+`separatorStyle`-style flags to a generic `ListViewController` — "suddenly there'll be like a
+hundred booleans" (007/005). The generic type gets only what every client needs (or a platform
+capability that can be switched off); per-feature behaviour is injected as content, and "whoever
+creates it is responsible for decorating it according to its needs" (007/003). That's OCP: the list
+is closed for modification, open through what you put in it.
+
+Pagination UX acceptance criteria:
+
+- [ ] Load-more triggers only after the first page has loaded, only when `loadMore != nil`, and never while a load-more request is in flight
+- [ ] The load-more cell shows a loading state while loading
+- [ ] A failed load-more shows a tappable error with retry — the user can never get stuck (connections fail)
+- [ ] A failed load-more keeps the items already on screen
+- [ ] The footer label is named for a generic "message", not "error", so it can carry other text
+
 ---
 
 ## `CellController` — Type-Erased Cell Composition
@@ -474,10 +537,26 @@ public struct CellController {
     }
 }
 
-extension CellController: Equatable, Hashable {
-    // hash/compare by id — enables DiffableDataSource
+extension CellController: nonisolated Equatable {
+    public nonisolated static func == (lhs: CellController, rhs: CellController) -> Bool {
+        AnyHashable(lhs.id) == AnyHashable(rhs.id)
+    }
+}
+
+extension CellController: nonisolated Hashable {
+    public nonisolated func hash(into hasher: inout Hasher) {
+        hasher.combine(AnyHashable(id))
+    }
 }
 ```
+
+**Why `nonisolated` on the conformances**: `EssentialFeediOS` builds with
+`SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor` (and Approachable Concurrency), so a plain
+`extension CellController: Equatable, Hashable` would be inferred as a main-actor-isolated
+conformance. The diffable data source diffs on its own queue, off the main actor, so comparing and
+hashing must not require it. Equality and hashing only read the immutable, `Sendable` `id`, so
+opting out is safe. Any UI module that defaults to `MainActor` needs the same treatment for
+conformances used by framework code off-main (see `concurrency-at-boundaries.md`, "The limit").
 
 `CellController` enables `ListViewController` to manage any cell type through a uniform interface. The `id` property (typically the domain model itself, since it is `Hashable`) enables `DiffableDataSource` diffing.
 
@@ -490,7 +569,7 @@ Battle-tested against multiple iOS-version regressions:
 - `cellForRowAt` must reset **all** mutable cell state (shimmer, retry-button visibility), not just the image — prefetch can race display.
 - iOS 15+ may reuse a cached cell **without** calling `cellForRow` — implement `willDisplay` to recapture the cell reference and reload.
 - Cells can be recycled without ever displaying, so `didEndDisplaying` may never fire — `prepareForReuse` must invoke an `onReuse` closure that releases the controller's cell reference, and the controller must nil that closure when it releases the cell (else the previous controller's reuse fires against the new controller's cell).
-- Cancel requests via the loading-controllers registry (`[IndexPath: CellController]` populated in `cellForRowAt`), never by indexing the new model — `didEndDisplaying` fires for OLD cells after a data-source update (see SKILL.md gotcha).
+- In `didEndDisplaying` and `cancelPrefetchingForRowsAt`, look the controller up with `dataSource.itemIdentifier(for: indexPath)` — never by indexing your own model array, because `didEndDisplaying` fires for OLD cells after a data-source update. The diffable data source owns the old/new mapping; the `[IndexPath: CellController]` registry the case study once kept in `cellForRowAt` was deleted when it adopted diffable data sources (`e3fc04d`). Don't reintroduce it.
 
 ---
 
@@ -504,8 +583,8 @@ ListViewController.onRefresh
     |
     v
 LoadResourcePresentationAdapter.loadResource()
-    |  (1) presenter?.didStartLoading()  [synchronous via Task.immediate]
-    |  (2) loader()                      [async — calls FeedService]
+    |  (1) presenter?.didStartLoading()  [synchronous — called before the Task is created]
+    |  (2) loader()                      [async — Task.immediate starts it in the same turn]
     v
 FeedService.loadRemoteFeedWithLocalFallback()
     |  - tries remote, falls back to local
@@ -531,7 +610,9 @@ UITableView renders cells
 - Prefer `Task.immediate` over bare `Task { }` in adapters for synchronous-first execution — noting its availability floor (iOS 26+, no back-deployment); on earlier targets use plain `Task` and test via observable state (see `concurrency-at-boundaries.md`)
 - Do not skip `Task.isCancelled` checks after `await` — stale results must not reach the presenter
 - Do not create adapters, composites, decorators or proxies outside the Composition Root — they are wiring code, not business logic
-- Do not hold strong references from presenter to view — always use `WeakRefVirtualProxy` (UIKit)
+- Proxy with `WeakRefVirtualProxy` (UIKit) only the references that close a cycle back to the presenter (view → adapter → presenter → view); keep components owned only by the presenter (e.g. `FeedViewAdapter`) strong — proxying them deallocates them and nothing renders
+- Do not add per-feature flags (`hasPagination`, `showsRefresh`) to a generic list — inject the behaviour as content (e.g. a load-more `CellController` section)
+- Do not merge, append or dedup pages in the UI — each `Paginated` page already carries everything loaded so far
 - Do not encode memory-management policy in a component — it belongs to whoever composes it
 - Do not put a side effect inside a composite, and do not widen a boundary protocol to host one — introduce a narrow role-specific abstraction and intercept at the composition site
 - Do not write a pattern type when a language construct already expresses it — write it when it removes real duplication
@@ -541,7 +622,9 @@ UITableView renders cells
 ## Verification
 
 - [ ] Every `LoadResourcePresentationAdapter` checks `Task.isCancelled` after `await`
-- [ ] Every `WeakRefVirtualProxy` wraps a view that could outlive the presenter
+- [ ] Every `WeakRefVirtualProxy` wraps a reference that closes a cycle back to the presenter, and no presenter-only-owned component (view adapter) is proxied
+- [ ] `CellController` conformances used by the diffable data source are `nonisolated` in a `MainActor`-default UI module
+- [ ] Cancellation in `didEndDisplaying` / `cancelPrefetching` looks controllers up via `dataSource.itemIdentifier(for:)`, with no `[IndexPath: CellController]` registry
 - [ ] `FeedViewAdapter` creates a new adapter instance for `loadMore` with forwarded `currentFeed`
 - [ ] `Paginated.loadMore` is `nil` for the last page (when `last` item is `nil`)
 - [ ] `CellController.id` uses the domain model for ITEM cells (correct diffing/reuse); auxiliary cells with no domain identity (load-more) use a fresh `UUID()` so each page render replaces them
