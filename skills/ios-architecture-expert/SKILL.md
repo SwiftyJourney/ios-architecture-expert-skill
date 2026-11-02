@@ -2,14 +2,13 @@
 name: ios-architecture-expert
 description: >-
   Use when the user is designing, structuring, refactoring, or reviewing the
-  architecture of an iOS/Swift app: separating features into modules/layers
-  (domain, API, cache, presentation, UI), choosing between MVC/MVVM/MVP,
-  wiring dependencies in a composition root, breaking up a view controller
-  that coordinates too much, making code testable via protocol boundaries and
-  test doubles, adapter/proxy/composite/decorator patterns, or handling
-  Sendable/@MainActor at module boundaries. Also use it to name what is wrong
-  with a design -- command-query separation, interface segregation, dependency
-  inversion, coupling bottlenecks. Trigger even when 'architecture' isn't
+  architecture of an iOS/Swift app: separating features into modules/layers,
+  choosing between MVC/MVVM/MVP, wiring dependencies in a composition root,
+  breaking up an overloaded view controller, making code testable via protocol
+  boundaries and test doubles, adapter/proxy/composite/decorator patterns, or
+  handling Sendable/@MainActor at module boundaries. Also use it to name what
+  is wrong with a design -- command-query separation, interface segregation,
+  dependency inversion, coupling bottlenecks. Trigger even when 'architecture' isn't
   mentioned -- e.g. 'where should networking code live', 'my view controller
   is untestable', 'how do I split this into Swift packages', 'MVVM vs MVP',
   'should this be a protocol'. Do NOT use for pure SwiftUI view/state/styling

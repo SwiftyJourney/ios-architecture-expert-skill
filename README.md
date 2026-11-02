@@ -117,6 +117,7 @@ Everything else about testing — test doubles, `makeSUT` and test design, deter
 ```
 skills/ios-architecture-expert/          # the skill — this is what ships
 ├── SKILL.md                             # Hub + diagnostic table + gotchas + reference router
+├── evals/                               # Trigger queries + test cases (`claude plugin eval`); excluded from .skill packages
 └── references/
     ├── design-principles.md             # Symptom→principle table; the reasoning behind the patterns
     ├── dependency-management.md         # Singleton taxonomy, DI techniques, composer rules, lifetimes
@@ -130,7 +131,6 @@ skills/ios-architecture-expert/          # the skill — this is what ships
     ├── feature-implementation-workflow.md  # Feature building, spy-first/protocol-last, legacy extraction
     ├── swiftui-composition.md           # @main App root, environment DI, NavigationStack routing, @Observable
     └── spm-project-structure.md         # Onion, slicing, SPM module layout + Swift 6 settings + CI
-evals/                                   # Trigger eval queries + output-quality test cases (repo-only)
 .claude-plugin/                          # plugin + marketplace manifests (repo-only)
 ```
 

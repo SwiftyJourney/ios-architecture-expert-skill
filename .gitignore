@@ -137,3 +137,6 @@ case-study/
 
 # Local agent config
 .claude/
+
+# claude plugin eval output
+skills/*/evals/results/
